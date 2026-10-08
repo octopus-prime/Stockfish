@@ -51,7 +51,18 @@ inline Move* splat_pawn_moves(Move* moveList, Bitboard to_bb) {
     return moveList + popcount(to_bb);
 }
 
-inline Move* splat_moves(Move* moveList, Square from, Bitboard to_bb) {
+inline Move* splat_leaper_moves(Move* moveList, Square from, Bitboard to_bb) {
+    assert(popcount(to_bb) <= 8);  // max 8 attacks
+
+    const __m128i fromVec = _mm_set1_epi16(Move(from, SQUARE_ZERO).raw());
+    const __m128i toSquares = _mm_cvtepi8_epi16(_mm512_castsi512_si128(_mm512_maskz_compress_epi8(to_bb, AllSquares)));
+    const __m128i moves = _mm_or_si128(fromVec, _mm_slli_epi16(toSquares, Move::ToSqShift));
+
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(moveList), moves);
+    return moveList + popcount(to_bb);
+}
+
+inline Move* splat_slider_moves(Move* moveList, Square from, Bitboard to_bb) {
     assert(popcount(to_bb) <= 32);  // Q can attack up to 27 squares
 
     const __m512i fromVec = _mm512_set1_epi16(Move(from, SQUARE_ZERO).raw());
@@ -75,7 +86,13 @@ inline Move* splat_pawn_moves(Move* moveList, Bitboard to_bb) {
     return moveList;
 }
 
-inline Move* splat_moves(Move* moveList, Square from, Bitboard to_bb) {
+inline Move* splat_leaper_moves(Move* moveList, Square from, Bitboard to_bb) {
+    while (to_bb)
+        *moveList++ = Move(from, pop_lsb(to_bb));
+    return moveList;
+}
+
+inline Move* splat_slider_moves(Move* moveList, Square from, Bitboard to_bb) {
     while (to_bb)
         *moveList++ = Move(from, pop_lsb(to_bb));
     return moveList;
@@ -197,7 +214,11 @@ Move* generate_moves(const Position& pos, Move* moveList, Bitboard target) {
         Square   from = pop_lsb(bb);
         Bitboard b    = Attacks::attacks_bb(Pt, from, pos.pieces()) & target;
 
-        moveList = splat_moves(moveList, from, b);
+        if constexpr (Pt == KNIGHT || Pt == KING) {
+            moveList = splat_leaper_moves(moveList, from, b);
+        } else {
+            moveList = splat_slider_moves(moveList, from, b);
+        }
     }
 
     return moveList;
@@ -229,7 +250,7 @@ Move* generate_all(const Position& pos, Move* moveList) {
 
     Bitboard b = Attacks::attacks_bb(KING, ksq) & (Type == EVASIONS ? ~pos.pieces(Us) : target);
 
-    moveList = splat_moves(moveList, ksq, b);
+    moveList = splat_leaper_moves(moveList, ksq, b);
 
     if ((Type == QUIETS || Type == NON_EVASIONS) && pos.can_castle(Us & ANY_CASTLING))
         for (CastlingRights cr : {Us & KING_SIDE, Us & QUEEN_SIDE})
