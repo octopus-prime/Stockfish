@@ -55,7 +55,8 @@ inline Move* splat_leaper_moves(Move* moveList, Square from, Bitboard to_bb) {
     assert(popcount(to_bb) <= 8);  // K and N can attack up to 8 squares
 
     const __m128i fromVec = _mm_set1_epi16(Move(from, SQUARE_ZERO).raw());
-    const __m128i toSquares = _mm_cvtepi8_epi16(_mm512_castsi512_si128(_mm512_maskz_compress_epi8(to_bb, AllSquares)));
+    const __m128i toSquares =
+      _mm_cvtepi8_epi16(_mm512_castsi512_si128(_mm512_maskz_compress_epi8(to_bb, AllSquares)));
     const __m128i moves = _mm_or_si128(fromVec, _mm_slli_epi16(toSquares, Move::ToSqShift));
 
     _mm_storeu_si128(reinterpret_cast<__m128i*>(moveList), moves);
@@ -232,11 +233,16 @@ Move* generate_moves(const Position& pos, Move* moveList, Bitboard target) {
         Square   from = pop_lsb(bb);
         Bitboard b    = Attacks::attacks_bb(Pt, from, pos.pieces()) & target;
 
-        if constexpr (Pt == KNIGHT || Pt == KING) {
+        if constexpr (Pt == KNIGHT || Pt == KING)
+        {
             moveList = splat_leaper_moves(moveList, from, b);
-        } else if constexpr (Pt == BISHOP || Pt == ROOK) {
+        }
+        else if constexpr (Pt == BISHOP || Pt == ROOK)
+        {
             moveList = splat_slider_moves(moveList, from, b);
-        } else {
+        }
+        else
+        {
             moveList = splat_queen_moves(moveList, from, b);
         }
     }
