@@ -52,7 +52,7 @@ inline Move* splat_pawn_moves(Move* moveList, Bitboard to_bb) {
 }
 
 inline Move* splat_leaper_moves(Move* moveList, Square from, Bitboard to_bb) {
-    assert(popcount(to_bb) <= 8);  // max 8 attacks
+    assert(popcount(to_bb) <= 8);  // K and N can attack up to 8 squares
 
     const __m128i fromVec = _mm_set1_epi16(Move(from, SQUARE_ZERO).raw());
     const __m128i toSquares = _mm_cvtepi8_epi16(_mm512_castsi512_si128(_mm512_maskz_compress_epi8(to_bb, AllSquares)));
@@ -63,6 +63,18 @@ inline Move* splat_leaper_moves(Move* moveList, Square from, Bitboard to_bb) {
 }
 
 inline Move* splat_slider_moves(Move* moveList, Square from, Bitboard to_bb) {
+    assert(popcount(to_bb) <= 16);  // B and R can attack up to 14 squares
+
+    const __m256i fromVec = _mm256_set1_epi16(Move(from, SQUARE_ZERO).raw());
+    const __m256i toSquares =
+      _mm256_cvtepi8_epi16(_mm512_castsi512_si128(_mm512_maskz_compress_epi8(to_bb, AllSquares)));
+    const __m256i moves = _mm256_or_si256(fromVec, _mm256_slli_epi16(toSquares, Move::ToSqShift));
+
+    _mm256_storeu_si256(reinterpret_cast<__m256i*>(moveList), moves);
+    return moveList + popcount(to_bb);
+}
+
+inline Move* splat_queen_moves(Move* moveList, Square from, Bitboard to_bb) {
     assert(popcount(to_bb) <= 32);  // Q can attack up to 27 squares
 
     const __m512i fromVec = _mm512_set1_epi16(Move(from, SQUARE_ZERO).raw());
@@ -93,6 +105,12 @@ inline Move* splat_leaper_moves(Move* moveList, Square from, Bitboard to_bb) {
 }
 
 inline Move* splat_slider_moves(Move* moveList, Square from, Bitboard to_bb) {
+    while (to_bb)
+        *moveList++ = Move(from, pop_lsb(to_bb));
+    return moveList;
+}
+
+inline Move* splat_queen_moves(Move* moveList, Square from, Bitboard to_bb) {
     while (to_bb)
         *moveList++ = Move(from, pop_lsb(to_bb));
     return moveList;
@@ -216,8 +234,10 @@ Move* generate_moves(const Position& pos, Move* moveList, Bitboard target) {
 
         if constexpr (Pt == KNIGHT || Pt == KING) {
             moveList = splat_leaper_moves(moveList, from, b);
-        } else {
+        } else if constexpr (Pt == BISHOP || Pt == ROOK) {
             moveList = splat_slider_moves(moveList, from, b);
+        } else {
+            moveList = splat_queen_moves(moveList, from, b);
         }
     }
 
