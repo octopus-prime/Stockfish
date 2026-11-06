@@ -242,72 +242,7 @@ namespace {
 
 constexpr IndexType Dimensions = FeatureTransformer::OutputDimensions;
 
-#ifdef USE_RVV
-
-struct Tiling {
-    static constexpr int NumRegs = 1;
-};
-
-using Tile = vint16m8_t;
-
-sf_always_inline Tile load_tile(IndexType j, const i16* data) {
-    usize vl = __riscv_vsetvl_e16m8(Dimensions - j);
-    return __riscv_vle16_v_i16m8(data + j, vl);
-}
-
-sf_always_inline void store_tile(IndexType j, i16* dest, Tile acc) {
-    usize vl = __riscv_vsetvl_e16m8(Dimensions - j);
-    __riscv_vse16_v_i16m8(dest + j, acc, vl);
-}
-
-sf_always_inline void increment_index(IndexType& j) { j += __riscv_vsetvl_e16m8(Dimensions - j); }
-
-template<int sign>
-sf_always_inline Tile apply(IndexType j, Tile acc, const i16* data) {
-    static_assert(sign == 1 || sign == -1);
-    usize      vl       = __riscv_vsetvl_e16m8(Dimensions - j);
-    vint16m8_t data_vec = __riscv_vle16_v_i16m8(data, vl);
-    if constexpr (sign == +1)
-        acc = __riscv_vadd_vv_i16m8(acc, data_vec, vl);
-    else
-        acc = __riscv_vsub_vv_i16m8(acc, data_vec, vl);
-    return acc;
-}
-
-template<int sign>
-sf_always_inline Tile apply_feature_single(IndexType j, Tile acc, const i8* data) {
-    static_assert(sign == 1 || sign == -1);
-    usize     vl         = __riscv_vsetvl_e16m8(Dimensions - j);
-    vint8m4_t weight_vec = __riscv_vle8_v_i8m4(data, vl);
-    if constexpr (sign == +1)
-        acc = __riscv_vwadd_wv_i16m8(acc, weight_vec, vl);
-    else
-        acc = __riscv_vwsub_wv_i16m8(acc, weight_vec, vl);
-    return acc;
-}
-
-#else  // VECTOR or non VECTOR
-
-    #ifdef VECTOR
-
 using Tiling = SIMDTiling<Dimensions, Dimensions>;
-
-    #else
-
-// Treat scalar impl as degenerate size-1 vector
-struct Tiling {
-    static constexpr int NumRegs    = 1;
-    static constexpr int TileHeight = 1;
-};
-
-using vec_t    = i16;
-using vec_i8_t = i8;
-
-        #define vec_add_16(a, b) ((a) + (b))
-        #define vec_sub_16(a, b) ((a) - (b))
-        #define vec_convert_8_16(a) (i16(a))
-
-    #endif
 
 struct Tile {
     vec_t inner[Tiling::NumRegs];
@@ -335,9 +270,9 @@ sf_always_inline Tile apply([[maybe_unused]] IndexType j, Tile acc, const i16* d
     const auto* column = reinterpret_cast<const vec_t*>(data);
     for (IndexType k = 0; k < Tiling::NumRegs; ++k)
         if constexpr (sign == +1)
-            acc[k] = vec_add_16(acc[k], column[k]);
+            acc[k] = _mm512_add_epi16(acc[k], column[k]);
         else
-            acc[k] = vec_sub_16(acc[k], column[k]);
+            acc[k] = _mm512_sub_epi16(acc[k], column[k]);
     return acc;
 }
 
@@ -345,97 +280,57 @@ template<int sign>
 sf_always_inline Tile apply_feature_single([[maybe_unused]] IndexType j, Tile acc, const i8* data) {
     static_assert(sign == 1 || sign == -1);
     [[maybe_unused]] auto* column = reinterpret_cast<const vec_i8_t*>(data);
-    #ifdef USE_NEON
-    for (IndexType k = 0; k < Tiling::NumRegs; k += 2)
-    {
-        if constexpr (sign == +1)
-        {
-            acc[k]     = vaddw_s8(acc[k], vget_low_s8(column[k / 2]));
-            acc[k + 1] = vaddw_high_s8(acc[k + 1], column[k / 2]);
-        }
-        else
-        {
-            acc[k]     = vsubw_s8(acc[k], vget_low_s8(column[k / 2]));
-            acc[k + 1] = vsubw_high_s8(acc[k + 1], column[k / 2]);
-        }
-    }
-    #elif defined(USE_LSX) && !defined(USE_LASX)
-    for (IndexType k = 0; k < Tiling::NumRegs; k += 2)
-    {
-        if constexpr (sign == +1)
-        {
-            const __m128i weight = __lsx_vld(reinterpret_cast<const void*>(&column[k]), 0);
-            acc[k]               = vec_add_16(acc[k], __lsx_vsllwil_h_b(weight, 0));
-            acc[k + 1]           = vec_add_16(acc[k + 1], __lsx_vexth_h_b(weight));
-        }
-        else
-        {
-            const __m128i weight = __lsx_vld(reinterpret_cast<const void*>(&column[k]), 0);
-            acc[k]               = vec_sub_16(acc[k], __lsx_vsllwil_h_b(weight, 0));
-            acc[k + 1]           = vec_sub_16(acc[k + 1], __lsx_vexth_h_b(weight));
-        }
-    }
-    #elif defined(USE_PAIRED_WIDENING_ADD)
     static_assert(Tiling::NumRegs % 2 == 0);
-    const vec_t zero = vec_zero();
-        #if defined(__clang__)
-            #pragma clang loop unroll(full)
-        #elif defined(__GNUC__)
-            #pragma GCC unroll(Tiling::NumRegs / 2)
-        #endif
+    const vec_t zero = _mm512_setzero_epi32();
+#if defined(__clang__)
+    #pragma clang loop unroll(full)
+#else
+    #pragma GCC unroll(Tiling::NumRegs / 2)
+#endif
     for (IndexType k = 0; k < Tiling::NumRegs; k += 2)
     {
-        const vec_t weight = vec_load(reinterpret_cast<const vec_t*>(data) + k / 2);
-        const vec_t lo     = vec_srai_16(vec_unpacklo_8(zero, weight), 8);
-        const vec_t hi     = vec_srai_16(vec_unpackhi_8(zero, weight), 8);
+        const vec_t weight = _mm512_load_si512(reinterpret_cast<const vec_t*>(data) + k / 2);
+        const vec_t lo     = _mm512_srai_epi16(_mm512_unpacklo_epi8(zero, weight), 8);
+        const vec_t hi     = _mm512_srai_epi16(_mm512_unpackhi_epi8(zero, weight), 8);
         if constexpr (sign == +1)
         {
-            acc[k]     = vec_add_16(acc[k], lo);
-            acc[k + 1] = vec_add_16(acc[k + 1], hi);
+            acc[k]     = _mm512_add_epi16(acc[k], lo);
+            acc[k + 1] = _mm512_add_epi16(acc[k + 1], hi);
         }
         else
         {
-            acc[k]     = vec_sub_16(acc[k], lo);
-            acc[k + 1] = vec_sub_16(acc[k + 1], hi);
+            acc[k]     = _mm512_sub_epi16(acc[k], lo);
+            acc[k + 1] = _mm512_sub_epi16(acc[k + 1], hi);
         }
     }
-    #else
-    for (IndexType k = 0; k < Tiling::NumRegs; ++k)
-        if constexpr (sign == +1)
-            acc[k] = vec_add_16(acc[k], vec_convert_8_16(column[k]));
-        else
-            acc[k] = vec_sub_16(acc[k], vec_convert_8_16(column[k]));
-    #endif
     return acc;
 }
-
-    #if defined(USE_PAIRED_WIDENING_ADD)
 
 template<int sign>
 sf_always_inline Tile apply_feature_pair(Tile acc, const i8* data0, const i8* data1) {
     static_assert(sign == 1 || sign == -1);
     static_assert(Tiling::NumRegs % 2 == 0);
-    const vec_t ones = vec_set_8(1);
-        #if defined(__clang__)
-            #pragma clang loop unroll(full)
-        #elif defined(__GNUC__)
-            #pragma GCC unroll(Tiling::NumRegs / 2)
-        #endif
+    const vec_t ones = _mm512_set1_epi8(1);
+#if defined(__clang__)
+    #pragma clang loop unroll(full)
+#else
+    #pragma GCC unroll(Tiling::NumRegs / 2)
+#endif
     for (IndexType k = 0; k < Tiling::NumRegs; k += 2)
     {
-        const vec_t w0 = vec_load(reinterpret_cast<const vec_t*>(data0) + k / 2);
-        const vec_t w1 = vec_load(reinterpret_cast<const vec_t*>(data1) + k / 2);
-        const vec_t lo = vec_maddubs_16(ones, vec_unpacklo_8(w0, w1));
-        const vec_t hi = vec_maddubs_16(ones, vec_unpackhi_8(w0, w1));
+        const vec_t w0 = _mm512_load_si512(reinterpret_cast<const vec_t*>(data0) + k / 2);
+        const vec_t w1 = _mm512_load_si512(reinterpret_cast<const vec_t*>(data1) + k / 2);
+        const vec_t lo = _mm512_maddubs_epi16(ones, _mm512_unpacklo_epi8(w0, w1));
+        const vec_t hi = _mm512_maddubs_epi16(ones, _mm512_unpackhi_epi8(w0, w1));
         if constexpr (sign == +1)
         {
-            acc[k]     = vec_add_16(acc[k], lo);
-            acc[k + 1] = vec_add_16(acc[k + 1], hi);
+            acc[k]     = _mm512_add_epi16(acc[k], lo);
+            acc[k + 1] = _mm512_add_epi16(acc[k + 1], hi);
         }
         else
         {
-            acc[k]     = vec_sub_16(acc[k], lo);
-            acc[k + 1] = vec_sub_16(acc[k + 1], hi);
+            acc[k]     = _mm512_sub_epi16(acc[k], lo);
+            acc[k + 1] = _mm512_sub_epi16(acc[k + 1], hi);
         }
     }
     return acc;
@@ -445,26 +340,26 @@ sf_always_inline Tile apply_feature_pair(Tile acc, const i8* data0, const i8* da
 // operand is valid; the bias cancels and |add - sub| <= 255 can't saturate.
 sf_always_inline Tile apply_feature_diff(Tile acc, const i8* add, const i8* sub) {
     static_assert(Tiling::NumRegs % 2 == 0);
-    const vec_t bias  = vec_set_8(-128);
-    const vec_t signs = vec_set_16(-255);  // i8 pairs (+1, -1)
-        #if defined(__clang__)
-            #pragma clang loop unroll(full)
-        #elif defined(__GNUC__)
-            #pragma GCC unroll(Tiling::NumRegs / 2)
-        #endif
+    const vec_t bias  = _mm512_set1_epi8(-128);
+    const vec_t signs = _mm512_set1_epi16(-255);  // i8 pairs (+1, -1)
+#if defined(__clang__)
+    #pragma clang loop unroll(full)
+#else
+    #pragma GCC unroll(Tiling::NumRegs / 2)
+#endif
     for (IndexType k = 0; k < Tiling::NumRegs; k += 2)
     {
-        const vec_t ua = vec_xor(vec_load(reinterpret_cast<const vec_t*>(add) + k / 2), bias);
-        const vec_t us = vec_xor(vec_load(reinterpret_cast<const vec_t*>(sub) + k / 2), bias);
-        acc[k]         = vec_add_16(acc[k], vec_maddubs_16(vec_unpacklo_8(ua, us), signs));
-        acc[k + 1]     = vec_add_16(acc[k + 1], vec_maddubs_16(vec_unpackhi_8(ua, us), signs));
+        const vec_t ua =
+          _mm512_xor_si512(_mm512_load_si512(reinterpret_cast<const vec_t*>(add) + k / 2), bias);
+        const vec_t us =
+          _mm512_xor_si512(_mm512_load_si512(reinterpret_cast<const vec_t*>(sub) + k / 2), bias);
+        acc[k] =
+          _mm512_add_epi16(acc[k], _mm512_maddubs_epi16(_mm512_unpacklo_epi8(ua, us), signs));
+        acc[k + 1] =
+          _mm512_add_epi16(acc[k + 1], _mm512_maddubs_epi16(_mm512_unpackhi_epi8(ua, us), signs));
     }
     return acc;
 }
-
-    #endif
-
-#endif
 
 // The weight-table base already includes the tile offset.
 template<int sign, bool Incremental = false>
@@ -474,26 +369,20 @@ apply_features(IndexType j, Tile acc, const u16* indices, int count, const i8* w
     if constexpr (Incremental)
     {
         assert(count >= 0 && count <= 2);
-#if defined(VECTOR) || defined(USE_RVV)
-    #if defined(USE_PAIRED_WIDENING_ADD)
         if (count == 2)
             return apply_feature_pair<sign>(acc, &weights[usize(indices[0]) * Dimensions],
                                             &weights[usize(indices[1]) * Dimensions]);
-    #endif
         if (count > 0)
             acc = apply_feature_single<sign>(j, acc, &weights[usize(indices[0]) * Dimensions]);
         if (count > 1)
             acc = apply_feature_single<sign>(j, acc, &weights[usize(indices[1]) * Dimensions]);
         return acc;
-#endif
     }
 
     int i = 0;
-#if defined(USE_PAIRED_WIDENING_ADD)
     for (; i + 1 < count; i += 2)
         acc = apply_feature_pair<sign>(acc, &weights[usize(indices[i]) * Dimensions],
                                        &weights[usize(indices[i + 1]) * Dimensions]);
-#endif
     for (; i < count; ++i)
         acc = apply_feature_single<sign>(j, acc, &weights[usize(indices[i]) * Dimensions]);
     return acc;
@@ -514,7 +403,6 @@ sf_always_inline Tile apply_features_but_odd(IndexType                 j,
     const auto* psqWeights = &psqBase[j];
     const auto* thrWeights = &ft.threatAndPpWeights[j];
     odd                    = nullptr;
-#if defined(USE_PAIRED_WIDENING_ADD)
     if ((psqCount + thrCount) % 2 != 0)
         odd = thrCount > 0 ? &thrWeights[usize(thr[--thrCount]) * Dimensions]
                            : &psqWeights[usize(psq[--psqCount]) * Dimensions];
@@ -528,7 +416,6 @@ sf_always_inline Tile apply_features_but_odd(IndexType                 j,
         ++thr;
         --thrCount;
     }
-#endif
 
     acc = apply_features<sign, Incremental>(j, acc, psq, psqCount, psqWeights);
     return apply_features<sign>(j, acc, thr, thrCount, thrWeights);
@@ -538,10 +425,8 @@ sf_always_inline Tile apply_odd_features(IndexType j,
                                          Tile      acc,
                                          const i8* removed,
                                          const i8* added) {
-#if defined(USE_PAIRED_WIDENING_ADD)
     if (removed && added)
         return apply_feature_diff(acc, added, removed);
-#endif
     if (removed)
         acc = apply_feature_single<-1>(j, acc, removed);
     if (added)
@@ -712,7 +597,6 @@ void update_accumulator_incremental_both(const FeatureTransformer& featureTransf
 
 Bitboard get_changed_pieces(const std::array<Piece, SQUARE_NB>& oldPieces,
                             const std::array<Piece, SQUARE_NB>& newPieces) {
-#if defined(USE_AVX2)
     static_assert(sizeof(Piece) == 1);
     Bitboard sameBB = 0;
 
@@ -725,92 +609,6 @@ Bitboard get_changed_pieces(const std::array<Piece, SQUARE_NB>& oldPieces,
         sameBB |= static_cast<Bitboard>(equalMask) << i;
     }
     return ~sameBB;
-#elif defined(USE_LASX)
-    static_assert(sizeof(Piece) == 1);
-
-    Bitboard changed = 0;
-
-    for (int i = 0; i < 64; i += 32)
-    {
-        const __m256i old_v = __lasx_xvld(reinterpret_cast<const void*>(&oldPieces[i]), 0);
-        const __m256i new_v = __lasx_xvld(reinterpret_cast<const void*>(&newPieces[i]), 0);
-        const __m256i diff  = __lasx_xvxor_v(old_v, new_v);
-        const __m256i mask  = __lasx_xvmsknz_b(diff);
-        const auto    lo    = __lasx_xvpickve2gr_d(mask, 0);
-        const auto    hi    = __lasx_xvpickve2gr_d(mask, 2);
-
-        changed |= (static_cast<Bitboard>(lo) | (static_cast<Bitboard>(hi) << 16)) << i;
-    }
-
-    return changed;
-#elif defined(USE_LSX)
-    static_assert(sizeof(Piece) == 1);
-
-    Bitboard changed = 0;
-
-    for (int i = 0; i < 64; i += 16)
-    {
-        const __m128i old_v = __lsx_vld(reinterpret_cast<const void*>(&oldPieces[i]), 0);
-        const __m128i new_v = __lsx_vld(reinterpret_cast<const void*>(&newPieces[i]), 0);
-        const __m128i diff  = __lsx_vxor_v(old_v, new_v);
-        const __m128i mask  = __lsx_vmsknz_b(diff);
-
-        changed |= static_cast<Bitboard>(__lsx_vpickve2gr_d(mask, 0)) << i;
-    }
-
-    return changed;
-#elif defined(USE_NEON)
-    uint8x16x4_t old_v = vld4q_u8(reinterpret_cast<const u8*>(oldPieces.data()));
-    uint8x16x4_t new_v = vld4q_u8(reinterpret_cast<const u8*>(newPieces.data()));
-    auto         cmp   = [=](const int i) { return vceqq_u8(old_v.val[i], new_v.val[i]); };
-
-    uint8x16_t cmp0_1 = vsriq_n_u8(cmp(1), cmp(0), 1);
-    uint8x16_t cmp2_3 = vsriq_n_u8(cmp(3), cmp(2), 1);
-    uint8x16_t merged = vsriq_n_u8(cmp2_3, cmp0_1, 2);
-    merged            = vsriq_n_u8(merged, merged, 4);
-    uint8x8_t sameBB  = vshrn_n_u16(vreinterpretq_u16_u8(merged), 4);
-
-    return ~vget_lane_u64(vreinterpret_u64_u8(sameBB), 0);
-#elif defined(USE_SSE2)
-    Bitboard sameBB = 0;
-
-    for (int i = 0; i < 64; i += 16)
-    {
-        const __m128i old_v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&oldPieces[i]));
-        const __m128i new_v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&newPieces[i]));
-        const __m128i same  = _mm_cmpeq_epi8(old_v, new_v);
-
-        sameBB |= static_cast<Bitboard>(_mm_movemask_epi8(same)) << i;
-    }
-
-    return ~sameBB;
-#elif defined(USE_RVV)
-
-    #define IMPL(mx, bx) \
-        return __riscv_vmv_x_s_u64m1_u64(__riscv_vreinterpret_v_u8m1_u64m1( \
-          __riscv_vreinterpret_v_b##bx##_u8m1(__riscv_vmsne_vv_i8m##mx##_b##bx( \
-            __riscv_vle8_v_i8m##mx(reinterpret_cast<const i8*>(oldPieces.data()), 64), \
-            __riscv_vle8_v_i8m##mx(reinterpret_cast<const i8*>(newPieces.data()), 64), 64))))
-
-
-    usize vl = __riscv_vsetvlmax_e8m1();
-    if (vl >= 64)
-        IMPL(1, 8);
-    else if (vl == 32)
-        IMPL(2, 4);
-    else
-        IMPL(4, 2);
-
-    #undef IMPL
-
-#else
-    Bitboard changed = 0;
-
-    for (Square sq = SQUARE_ZERO; sq < SQUARE_NB; ++sq)
-        changed |= static_cast<Bitboard>(oldPieces[sq] != newPieces[sq]) << sq;
-
-    return changed;
-#endif
 }
 
 // Append the PSQ feature indices that differ between two piece arrays, given
@@ -827,24 +625,8 @@ sf_always_inline void append_changed_psq_indices(Color                          
     const Bitboard removedBB = changedBB & oldBB;
     const Bitboard addedBB   = changedBB & newBB;
 
-#if defined(USE_AVX512ICL)
     PSQFeatureSet::write_indices(oldPieces, newPieces, removedBB, addedBB, perspective, ksq,
                                  removed, added);
-#else
-    Bitboard r = removedBB;
-    while (r)
-    {
-        const Square sq = pop_lsb(r);
-        removed.push_back(PSQFeatureSet::make_index(perspective, sq, oldPieces[sq], ksq));
-    }
-
-    Bitboard a = addedBB;
-    while (a)
-    {
-        const Square sq = pop_lsb(a);
-        added.push_back(PSQFeatureSet::make_index(perspective, sq, newPieces[sq], ksq));
-    }
-#endif
 }
 
 // Updates accumulator for a king move, and also updates the accumulator cache

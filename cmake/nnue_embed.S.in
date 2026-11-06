@@ -1,0 +1,17 @@
+.section .rodata
+.balign 64
+.global gEmbeddedNNUEData
+.type gEmbeddedNNUEData, @object
+gEmbeddedNNUEData:
+.incbin "@NNUE_FILE@"
+.LNNUEEnd:
+.size gEmbeddedNNUEData, . - gEmbeddedNNUEData
+
+.balign 4
+.global gEmbeddedNNUESize
+.type gEmbeddedNNUESize, @object
+gEmbeddedNNUESize:
+.long .LNNUEEnd - gEmbeddedNNUEData
+.size gEmbeddedNNUESize, 4
+
+.section .note.GNU-stack,"",@progbits

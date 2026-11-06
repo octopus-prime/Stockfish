@@ -93,7 +93,6 @@ void UCIEngine::init_search_update_listeners() {
 }
 
 void UCIEngine::loop() {
-    set_console_utf8();
     std::string token, cmd;
 
     for (int i = 1; i < cli.argc; ++i)

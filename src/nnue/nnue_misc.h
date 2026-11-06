@@ -38,8 +38,7 @@ namespace Eval::NNUE {
 // NNUE file metadata uses fixed string types so it stays trivially copyable and cheap to move
 // around between the engine and the network loader.
 struct EvalFile {
-    // Default net name, will use one of the EvalFileDefaultName* macros defined
-    // in evaluate.h
+    // Default net name from evaluate.h.
     constexpr static std::string_view defaultName = EvalFileDefaultName;
     // Selected net name, either via uci option or default
     std::optional<std::filesystem::path> current;

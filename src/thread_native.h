@@ -19,19 +19,15 @@
 #ifndef THREAD_NATIVE_H_INCLUDED
 #define THREAD_NATIVE_H_INCLUDED
 
-#ifdef _MSC_VER
-    #include <thread>
-#else
-    #include <pthread.h>
-    #include <cstdlib>
-    #include <cstring>
-    #include <functional>
-    #include <iostream>
-    #include <tuple>
-    #include <utility>
+#include <pthread.h>
+#include <cstdlib>
+#include <cstring>
+#include <functional>
+#include <iostream>
+#include <tuple>
+#include <utility>
 
-    #include "misc.h"
-#endif
+#include "misc.h"
 
 namespace Stockfish {
 
@@ -43,22 +39,6 @@ struct NativeThreadOptions {
         return *this;
     }
 };
-
-#ifdef _MSC_VER
-
-// MSVC-compatible toolchains use std::thread because they do not provide
-// pthreads by default. On all other platforms, pthreads is required and used.
-
-using NativeThread = std::thread;
-
-template<class Function, class... Args>
-NativeThread create_native_thread(NativeThreadOptions options, Function&& fun, Args&&... args) {
-    // TODO: implement fallible thread creation for MSVC
-    (void) options;
-    return NativeThread(std::forward<Function>(fun), std::forward<Args>(args)...);
-}
-
-#else
 
 struct ThreadCallableBase {  // type erase F
     virtual ~ThreadCallableBase() = default;
@@ -75,11 +55,7 @@ struct ThreadCallable final: ThreadCallableBase {
     void run() override { std::apply(func_, args_); }
 };
 
-// On OSX threads other than the main thread are created with a reduced stack
-// size of 512KB by default, this is too low for deep searches, which require
-// somewhat more than 1MB stack, so adjust it to TH_STACK_SIZE.
-// The implementation calls pthread_create() with the stack size parameter
-// equal to the Linux 8MB default, on platforms that support it.
+// Large-stack threads use the Linux 8MB default to support deep searches.
 
 class NativeThread {
     pthread_t thread;
@@ -159,8 +135,6 @@ create_native_thread(NativeThreadOptions options, Function&& fun, Args&&... args
         thread.start(options, func);
     return thread;
 }
-
-#endif  // _MSC_VER
 
 }  // namespace Stockfish
 

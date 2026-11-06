@@ -28,66 +28,11 @@
 #include "types.h"
 #include "bitboard.h"
 
-#ifdef __aarch64__
-    #include <arm_acle.h>
-    #define USE_HYPERBOLA_QUINT
-#elif defined(__loongarch__) && __loongarch_grlen == 64
-    #define USE_HYPERBOLA_QUINT
-#elif defined(USE_AVX2)
-    #include <immintrin.h>
-    #define USE_DUAL_HYPERBOLA_QUINT
-#endif
+#include <immintrin.h>
 
 namespace Stockfish::Attacks {
 
 void init();
-
-#ifdef USE_HYPERBOLA_QUINT
-
-inline Bitboard reverse_bb(Bitboard bb) {
-    #if __has_builtin(__builtin_bitreverse64)
-    return __builtin_bitreverse64(bb);
-    #else
-        #ifdef __aarch64__
-            #if defined(__GNUC__) && !defined(__clang__) \
-              && (__GNUC__ < 12 || (__GNUC__ == 12 && __GNUC_MINOR__ < 2))
-    // no rbit in arm_acle.h
-    Bitboard out;
-    asm("rbit %0, %1" : "=r"(out) : "r"(bb));
-    return out;
-            #else
-    return __rbitll(bb);
-            #endif
-        #else  // loongarch
-    Bitboard out;
-    asm("bitrev.d %0, %1" : "=r"(out) : "r"(bb));
-    return out;
-        #endif
-    #endif
-}
-
-// Hyperbola quintessence implementation for ARM, thanks to the availability of an
-// efficient bit reversal instruction.
-// See https://www.chessprogramming.org/Hyperbola_Quintessence
-struct Magic {
-    // For rooks: file attacks, rank attacks. For bishops: diagonal/antidiagonal
-    Bitboard mask1, mask2;
-
-    Bitboard hyperbola(Square s, Bitboard occupied, Bitboard mask) const {
-        Bitboard o   = occupied & mask;
-        Bitboard fwd = o - square_bb(s);
-        Bitboard rev = reverse_bb(o) - square_bb(Square(63 - int(s)));
-        return (fwd ^ reverse_bb(rev)) & mask;
-    }
-
-    Bitboard attacks_bb(Square s, Bitboard occupied) const {
-        return hyperbola(s, occupied, mask1) | hyperbola(s, occupied, mask2);
-    }
-};
-
-const Magic& magic(Square s, PieceType pt);
-
-#elif defined(USE_DUAL_HYPERBOLA_QUINT)
 
 struct alignas(32) DualMagic {
     // file, diagonal, antidiagonal, unused
@@ -115,8 +60,7 @@ struct alignas(32) DualMagic {
                                                           10, 11, 12, 13, 14, 15));
         };
 
-        // Each lane contains a mask and we follow the same HQ algorithm as
-        // given above in the ARM64 code path
+        // Each lane contains a mask for hyperbola quintessence.
         const __m256i mask = _mm256_load_si256(reinterpret_cast<const __m256i*>(this));
         const __m256i rs   = _mm256_set1_epi64x(r);
         const __m256i rrs  = _mm256_set1_epi64x(rr);
@@ -141,33 +85,6 @@ struct alignas(32) DualMagic {
 
 extern const std::array<DualMagic, SQUARE_NB> DualMagics;
 inline const DualMagic&                       dual_magic(Square s) { return DualMagics[s]; }
-
-#else
-// Magic holds all magic bitboards relevant data for a single square
-struct Magic {
-    Bitboard  mask;
-    Bitboard* attacks;
-    Bitboard  magic;
-    unsigned  shift;
-
-    // Compute the attack's index using the 'magic bitboards' approach
-    unsigned index(Bitboard occupied) const {
-        if (Is64Bit)
-            return unsigned(((occupied & mask) * magic) >> shift);
-
-        unsigned lo = unsigned(occupied) & unsigned(mask);
-        unsigned hi = unsigned(occupied >> 32) & unsigned(mask >> 32);
-        return (lo * unsigned(magic) ^ hi * unsigned(magic >> 32)) >> shift;
-    }
-
-    Bitboard attacks_bb([[maybe_unused]] Square s, Bitboard occupied) const {
-        return attacks[index(occupied)];
-    }
-};
-
-const Magic& magic(Square s, PieceType pt);
-
-#endif
 
 extern Bitboard LineBB[SQUARE_NB][SQUARE_NB];
 extern Bitboard BetweenBB[SQUARE_NB][SQUARE_NB];
@@ -292,7 +209,6 @@ sf_always_inline Bitboard attacks_bb(PieceType pt, Square s, Bitboard occupied) 
 
     assert(pt != PAWN && is_ok(s));
 
-#ifdef USE_DUAL_HYPERBOLA_QUINT
     [[maybe_unused]] const auto [bishop, rook] = dual_magic(s).both_attacks_bb(occupied);
 
     switch (pt)
@@ -306,26 +222,10 @@ sf_always_inline Bitboard attacks_bb(PieceType pt, Square s, Bitboard occupied) 
     default :
         return PseudoAttacks[pt][s];
     }
-#else
-    switch (pt)
-    {
-    case BISHOP :
-    case ROOK :
-        return magic(s, pt).attacks_bb(s, occupied);
-    case QUEEN :
-        return magic(s, BISHOP).attacks_bb(s, occupied) | magic(s, ROOK).attacks_bb(s, occupied);
-    default :
-        return PseudoAttacks[pt][s];
-    }
-#endif
 }
 
 inline std::pair<Bitboard, Bitboard> both_attacks_bb(Square s, Bitboard occupied) {
-#ifdef USE_DUAL_HYPERBOLA_QUINT
     return dual_magic(s).both_attacks_bb(occupied);
-#else
-    return {attacks_bb(BISHOP, s, occupied), attacks_bb(ROOK, s, occupied)};
-#endif
 }
 
 inline Bitboard attacks_bb(Piece pc, Square s, Bitboard occupied) {

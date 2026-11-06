@@ -22,9 +22,7 @@
 
 #include <array>
 
-#if defined(USE_AVX512ICL)
-    #include "../../bitboard.h"
-#endif
+#include "../../bitboard.h"
 #include "../../misc.h"
 #include "../../position.h"
 #include "../../types.h"
@@ -32,7 +30,6 @@
 
 namespace Stockfish::Eval::NNUE::Features {
 
-#if defined(USE_AVX512ICL)
 void K32H3::write_indices(const std::array<Piece, SQUARE_NB>& oldPieces,
                           const std::array<Piece, SQUARE_NB>& newPieces,
                           Bitboard                            removedBB,
@@ -78,7 +75,6 @@ void K32H3::write_indices(const std::array<Piece, SQUARE_NB>& oldPieces,
     _mm512_storeu_si512(write_removed, removed_indices);
     _mm512_storeu_si512(write_added, added_indices);
 }
-#endif
 
 // Index of a feature within its block for a given king position and another piece on
 // some square

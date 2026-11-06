@@ -53,8 +53,9 @@ This distribution of Stockfish consists of the following files:
 
   * [AUTHORS][authors-link], a text file with the list of authors for the project.
 
-  * [src][src-link], a subdirectory containing the full source code, including a
-    Makefile that can be used to compile Stockfish on Unix-like systems.
+  * [src][src-link], a subdirectory containing the engine source code.
+
+  * [CMakeLists.txt](CMakeLists.txt), the fixed-target Linux build.
 
   * a file with the .nnue extension, storing the neural network for the NNUE
     evaluation. Binary distributions will have this file embedded.
@@ -87,22 +88,49 @@ about the codebase and how to improve it.
 
 ## Compiling Stockfish
 
-Stockfish has support for 32 or 64-bit CPUs, certain hardware instructions,
-big-endian machines such as Power PC, and other platforms.
+This branch targets **Linux on the AMD Ryzen 7 9800X3D only**. It uses
+`-march=znver5`, including AVX-512, VNNI, VBMI2, BMI2 and POPCNT unconditionally.
+There are no architecture switches, ARM/NEON implementations, universal binaries
+or runtime CPU dispatch. Do not run the binary on a CPU without these features.
 
-On Unix-like systems, it should be easy to compile Stockfish directly from the
-source code with the included Makefile in the folder `src`. In general, it is
-recommended to run `make help` to see a list of make targets with corresponding
-descriptions. An example suitable for most Intel and AMD chips:
+Install CMake 3.25+, Ninja, and either GCC 14+ or Clang 19+. From the repository root:
 
+```sh
+cmake -S . -B build -G Ninja
+cmake --build build --parallel 2
+./build/stockfish
 ```
-cd src
-make -j profile-build
+
+The default build is Release with link-time optimization. To use Clang, configure
+a separate directory with `-DCMAKE_CXX_COMPILER=clang++`. Standard CMake Debug
+builds remain available; they do not change the fixed instruction set.
+
+CMake validates the default network's SHA-256 filename prefix and embeds it into
+the binary. It uses a valid network from `src/` when available, otherwise downloads
+it into the build directory over verified HTTPS. Network download failures or
+invalid hashes stop configuration. The validated network remains beside the
+executable for export tests.
+
+```sh
+cmake --build build --target bench
+ctest --test-dir build --output-on-failure
+cmake --install build --prefix "$HOME/.local"
 ```
 
-Detailed compilation instructions for all platforms can be found in our
-[documentation][wiki-compile-link]. Our wiki also has information about
-the [UCI commands][wiki-uci-link] supported by Stockfish.
+The instrumented tests require Python 3 and `requests`; they download the Syzygy
+test data on their first run. The signature test must produce **1556650** nodes.
+The longer existing perft and reproducibility checks require `expect` and can be
+run from `build/` using `bash ../tests/perft.sh` and `bash ../tests/reprosearch.sh`.
+
+CI build and execution tests use a self-hosted runner labelled
+`ryzen-9800x3d`, with the tools above installed, for GCC/Clang Release builds and
+a Clang Debug build with AddressSanitizer and UndefinedBehaviorSanitizer.
+The workflow is limited to this
+branch's pushes and manual runs so it does not execute untrusted pull requests on
+your machine. Cross-platform release/test workflows have been removed.
+
+Our upstream wiki documents the [UCI commands][wiki-uci-link]; its general build
+instructions do not apply to this branch.
 
 ## Terms of use
 
@@ -127,7 +155,7 @@ project][lc0-data-link], which is made available under the [Open Database Licens
 
 
 [authors-link]:       https://github.com/official-stockfish/Stockfish/blob/master/AUTHORS
-[build-link]:         https://github.com/official-stockfish/Stockfish/actions/workflows/stockfish.yml
+[build-link]:         https://github.com/octopus-prime/Stockfish/actions/workflows/stockfish.yml
 [commits-link]:       https://github.com/official-stockfish/Stockfish/commits/master
 [discord-link]:       https://discord.gg/GWDRS3kU6R
 [issue-link]:         https://github.com/official-stockfish/Stockfish/issues/new?assignees=&labels=&template=BUG-REPORT.yml
@@ -145,14 +173,13 @@ project][lc0-data-link], which is made available under the [Open Database Licens
 [website-link]:       https://stockfishchess.org
 [website-blog-link]:  https://stockfishchess.org/blog/
 [wiki-link]:          https://github.com/official-stockfish/Stockfish/wiki
-[wiki-compile-link]:  https://github.com/official-stockfish/Stockfish/wiki/Compiling-from-source
 [wiki-uci-link]:      https://github.com/official-stockfish/Stockfish/wiki/UCI-&-Commands
 [wiki-usage-link]:    https://github.com/official-stockfish/Stockfish/wiki/Download-and-usage
 [worker-link]:        https://github.com/official-stockfish/fishtest/wiki/Running-the-worker
 [lc0-data-link]:      https://storage.lczero.org/files/training_data
 [odbl-link]:          https://opendatacommons.org/licenses/odbl/odbl-10.txt
 
-[build-badge]:        https://img.shields.io/github/actions/workflow/status/official-stockfish/Stockfish/stockfish.yml?branch=master&style=for-the-badge&label=stockfish&logo=github
+[build-badge]:        https://img.shields.io/github/actions/workflow/status/octopus-prime/Stockfish/stockfish.yml?branch=ryzen-avx512-cmake&style=for-the-badge&label=stockfish&logo=github
 [commits-badge]:      https://img.shields.io/github/commits-since/official-stockfish/Stockfish/latest?style=for-the-badge
 [discord-badge]:      https://img.shields.io/discord/435943710472011776?style=for-the-badge&label=discord&logo=Discord
 [fishtest-badge]:     https://img.shields.io/website?style=for-the-badge&down_color=red&down_message=Offline&label=Fishtest&up_color=success&up_message=Online&url=https%3A%2F%2Ftests.stockfishchess.org%2Ftests%2Ffinished

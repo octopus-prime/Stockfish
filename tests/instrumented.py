@@ -192,12 +192,12 @@ class TestCLI(metaclass=OrderedClassMembers):
                 network = line.split(" ")[-1]
                 break
 
-        # find network file in src dir
-        network = os.path.join(PATH.parent.resolve(), "src", network)
+        # CMake places the validated network beside the executable.
+        network = os.path.join(pathlib.Path(get_path()).parent, network)
 
         if not os.path.exists(network):
             print(
-                f"Network file {network} not found, please download the network file over the make command."
+                f"Network file {network} not found; reconfigure the CMake build."
             )
             assert False
 

@@ -25,15 +25,11 @@
 #include "bitboard.h"
 #include "position.h"
 
-#if defined(USE_AVX512ICL)
-    #include <immintrin.h>
-#endif
+#include <immintrin.h>
 
 namespace Stockfish {
 
 namespace {
-
-#if defined(USE_AVX512ICL)
 
 template<Direction offset>
 inline Move* splat_pawn_moves(Move* moveList, Bitboard to_bb) {
@@ -60,26 +56,6 @@ inline Move* splat_moves(Move* moveList, Square from, Bitboard to_bb) {
     _mm512_storeu_si512(moveList, moves);
     return moveList + popcount(to_bb);
 }
-
-#else
-
-template<Direction offset>
-inline Move* splat_pawn_moves(Move* moveList, Bitboard to_bb) {
-    while (to_bb)
-    {
-        Square to   = pop_lsb(to_bb);
-        *moveList++ = Move(to - offset, to);
-    }
-    return moveList;
-}
-
-inline Move* splat_moves(Move* moveList, Square from, Bitboard to_bb) {
-    while (to_bb)
-        *moveList++ = Move(from, pop_lsb(to_bb));
-    return moveList;
-}
-
-#endif
 
 template<GenType Type, Direction D, bool Enemy>
 Move* make_promotions(Move* moveList, [[maybe_unused]] Square to) {

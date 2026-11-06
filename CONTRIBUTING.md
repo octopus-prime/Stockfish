@@ -16,12 +16,13 @@ making contributions to Stockfish.
 
 ## Building Stockfish
 
-In case you do not have a C++ compiler installed, you can follow the
-instructions from our wiki.
+This branch supports only Linux on the Ryzen 9800X3D, using GCC 14+ or Clang 19+.
+See [the build instructions](README.md#compiling-stockfish) for the fixed-target
+CMake build and required test tools. Architecture and operating-system
+alternatives should not be reintroduced.
 
-- [Ubuntu][ubuntu-compiling-link]
-- [Windows][windows-compiling-link]
-- [macOS][macos-compiling-link]
+Run `ctest --test-dir build --output-on-failure` after changes. Refactorings must
+preserve the bench signature (1556650), including move order and network output.
 
 ## Making Contributions
 
@@ -59,7 +60,8 @@ discussion._
 
 Changes to Stockfish C++ code should respect our coding style defined by
 [.clang-format](.clang-format). You can format your changes by running
-`make format`. This requires clang-format version 20 to be installed on your system.
+`cmake --build build --target format`. This target is available when
+clang-format version 20 is installed at configuration time.
 
 ## Navigate
 
@@ -91,6 +93,3 @@ Thank you for contributing to Stockfish and helping us make it even better!
 [discussions-link]:       https://github.com/official-stockfish/Stockfish/discussions/new
 [creating-my-first-test]: https://github.com/official-stockfish/fishtest/wiki/Creating-my-first-test#create-your-test
 [issue-tracker-link]:     https://github.com/official-stockfish/Stockfish/issues
-[ubuntu-compiling-link]:  https://github.com/official-stockfish/Stockfish/wiki/Developers#user-content-installing-a-compiler-1
-[windows-compiling-link]: https://github.com/official-stockfish/Stockfish/wiki/Developers#user-content-installing-a-compiler
-[macos-compiling-link]:   https://github.com/official-stockfish/Stockfish/wiki/Developers#user-content-installing-a-compiler-2

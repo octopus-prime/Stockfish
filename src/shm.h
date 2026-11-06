@@ -36,54 +36,23 @@
 #include <utility>
 #include <variant>
 
-#if (defined(__linux__) && !defined(__ANDROID__)) || defined(__APPLE__) || defined(__FreeBSD__) \
-  || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__DragonFly__)
-    #define USE_UNIX_SHM
-    #include "shm_unix.h"
-#endif
+#include "shm_unix.h"
 
 #include "types.h"
 
 #include "memory.h"
 
-#if defined(_WIN32)
-
-    #if _WIN32_WINNT < 0x0601
-        #undef _WIN32_WINNT
-        #define _WIN32_WINNT 0x0601  // Force to include needed API prototypes
-    #endif
-
-    #if !defined(NOMINMAX)
-        #define NOMINMAX
-    #endif
-    #include <windows.h>
-#elif defined(__linux__)
-    #include <cstring>
-    #include <fcntl.h>
-    #include <pthread.h>
-    #include <semaphore.h>
-    #include <sys/mman.h>
-    #include <sys/stat.h>
-    #include <unistd.h>
-#endif
+#include <cstring>
+#include <fcntl.h>
+#include <pthread.h>
+#include <semaphore.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 
-#if defined(__APPLE__)
-    #include <mach-o/dyld.h>
-    #include <sys/syslimits.h>
-
-#elif defined(__sun)
-    #include <stdlib.h>
-
-#elif defined(__FreeBSD__)
-    #include <sys/sysctl.h>
-    #include <sys/types.h>
-    #include <unistd.h>
-
-#elif defined(__NetBSD__) || defined(__DragonFly__) || defined(__linux__)
-    #include <limits.h>
-    #include <unistd.h>
-#endif
+#include <limits.h>
+#include <unistd.h>
 
 
 namespace Stockfish {
@@ -100,49 +69,12 @@ inline std::string getExecutablePathHash() {
     char  executable_path[4096] = {0};
     usize path_length           = 0;
 
-#if defined(_WIN32)
-    path_length = GetModuleFileNameA(NULL, executable_path, sizeof(executable_path));
-
-#elif defined(__APPLE__)
-    u32 size = sizeof(executable_path);
-    if (_NSGetExecutablePath(executable_path, &size) == 0)
-    {
-        path_length = std::strlen(executable_path);
-    }
-
-#elif defined(__sun)  // Solaris
-    const char* path = getexecname();
-    if (path)
-    {
-        std::strncpy(executable_path, path, sizeof(executable_path) - 1);
-        path_length = std::strlen(executable_path);
-    }
-
-#elif defined(__FreeBSD__)
-    usize size   = sizeof(executable_path);
-    int   mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1};
-    if (sysctl(mib, 4, executable_path, &size, NULL, 0) == 0)
-    {
-        path_length = std::strlen(executable_path);
-    }
-
-#elif defined(__NetBSD__) || defined(__DragonFly__)
-    ssize_t len = readlink("/proc/curproc/exe", executable_path, sizeof(executable_path) - 1);
-    if (len >= 0)
-    {
-        executable_path[len] = '\0';
-        path_length          = len;
-    }
-
-#elif defined(__linux__)
     ssize_t len = readlink("/proc/self/exe", executable_path, sizeof(executable_path) - 1);
     if (len >= 0)
     {
         executable_path[len] = '\0';
         path_length          = len;
     }
-
-#endif
 
     // In case of any error the path will be empty.
     return std::string(executable_path, path_length);
@@ -153,258 +85,6 @@ enum class SystemWideSharedConstantAllocationStatus {
     LocalMemory,
     SharedMemory
 };
-
-#if defined(_WIN32)
-
-inline std::string GetLastErrorAsString(DWORD error) {
-    //Get the error message ID, if any.
-    DWORD errorMessageID = error;
-    if (errorMessageID == 0)
-    {
-        return std::string();  //No error message has been recorded
-    }
-
-    LPSTR messageBuffer = nullptr;
-
-    //Ask Win32 to give us the string version of that message ID.
-    //The parameters we pass in, tell Win32 to create the buffer that holds the message for us (because we don't yet know how long the message string will be).
-    usize size = FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM
-                                  | FORMAT_MESSAGE_IGNORE_INSERTS,
-                                NULL, errorMessageID, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-                                (LPSTR) &messageBuffer, 0, NULL);
-
-    //Copy the error message into a std::string.
-    std::string message(messageBuffer, size);
-
-    //Free the Win32's string's buffer.
-    LocalFree(messageBuffer);
-
-    return message;
-}
-
-// Utilizes shared memory to store the value. It is deduplicated system-wide (for the single user).
-template<typename T>
-class SharedMemoryBackend {
-   public:
-    enum class Status {
-        Success,
-        LargePageAllocationError,
-        FileMappingError,
-        MapViewError,
-        MutexCreateError,
-        MutexWaitError,
-        MutexReleaseError,
-        NotInitialized
-    };
-
-    static constexpr DWORD IS_INITIALIZED_VALUE = 1;
-
-    SharedMemoryBackend() :
-        status(Status::NotInitialized) {}
-
-    SharedMemoryBackend(const std::string& shm_name, const T& value) :
-        status(Status::NotInitialized) {
-
-        initialize(shm_name, value);
-    }
-
-    bool is_valid() const { return status == Status::Success; }
-
-    std::optional<std::string> get_error_message() const {
-        switch (status)
-        {
-        case Status::Success :
-            return std::nullopt;
-        case Status::LargePageAllocationError :
-            return "Failed to allocate large page memory";
-        case Status::FileMappingError :
-            return "Failed to create file mapping: " + last_error_message;
-        case Status::MapViewError :
-            return "Failed to map view: " + last_error_message;
-        case Status::MutexCreateError :
-            return "Failed to create mutex: " + last_error_message;
-        case Status::MutexWaitError :
-            return "Failed to wait on mutex: " + last_error_message;
-        case Status::MutexReleaseError :
-            return "Failed to release mutex: " + last_error_message;
-        case Status::NotInitialized :
-            return "Not initialized";
-        default :
-            return "Unknown error";
-        }
-    }
-
-    void* get() const { return is_valid() ? pMap : nullptr; }
-
-    ~SharedMemoryBackend() { cleanup(); }
-
-    SharedMemoryBackend(const SharedMemoryBackend&)            = delete;
-    SharedMemoryBackend& operator=(const SharedMemoryBackend&) = delete;
-
-    SharedMemoryBackend(SharedMemoryBackend&& other) noexcept :
-        pMap(other.pMap),
-        hMapFile(other.hMapFile),
-        status(other.status),
-        last_error_message(std::move(other.last_error_message)) {
-
-        other.pMap     = nullptr;
-        other.hMapFile = 0;
-        other.status   = Status::NotInitialized;
-    }
-
-    SharedMemoryBackend& operator=(SharedMemoryBackend&& other) noexcept {
-        if (this != &other)
-        {
-            cleanup();
-            pMap               = other.pMap;
-            hMapFile           = other.hMapFile;
-            status             = other.status;
-            last_error_message = std::move(other.last_error_message);
-
-            other.pMap     = nullptr;
-            other.hMapFile = 0;
-            other.status   = Status::NotInitialized;
-        }
-        return *this;
-    }
-
-    SystemWideSharedConstantAllocationStatus get_status() const {
-        return status == Status::Success ? SystemWideSharedConstantAllocationStatus::SharedMemory
-                                         : SystemWideSharedConstantAllocationStatus::NoAllocation;
-    }
-
-   private:
-    void initialize(const std::string& shm_name, const T& value) {
-        const usize total_size = sizeof(T) + sizeof(IS_INITIALIZED_VALUE);
-
-        // Try allocating with large pages first.
-        hMapFile = windows_try_with_large_page_privileges(
-          [&](usize largePageSize) {
-              const usize total_size_aligned =
-                (total_size + largePageSize - 1) / largePageSize * largePageSize;
-
-    #if defined(_WIN64)
-              DWORD total_size_low  = total_size_aligned & 0xFFFFFFFFu;
-              DWORD total_size_high = total_size_aligned >> 32u;
-    #else
-              DWORD total_size_low  = total_size_aligned;
-              DWORD total_size_high = 0;
-    #endif
-
-              return CreateFileMappingA(INVALID_HANDLE_VALUE, NULL,
-                                        PAGE_READWRITE | SEC_COMMIT | SEC_LARGE_PAGES,
-                                        total_size_high, total_size_low, shm_name.c_str());
-          },
-          []() { return (void*) nullptr; });
-
-        // Fallback to normal allocation if no large pages available.
-        if (!hMapFile)
-        {
-            hMapFile = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0,
-                                          static_cast<DWORD>(total_size), shm_name.c_str());
-        }
-
-        if (!hMapFile)
-        {
-            const DWORD err    = GetLastError();
-            last_error_message = GetLastErrorAsString(err);
-            status             = Status::FileMappingError;
-            return;
-        }
-
-        pMap = MapViewOfFile(hMapFile, FILE_MAP_ALL_ACCESS, 0, 0, total_size);
-        if (!pMap)
-        {
-            const DWORD err    = GetLastError();
-            last_error_message = GetLastErrorAsString(err);
-            status             = Status::MapViewError;
-            cleanup_partial();
-            return;
-        }
-
-        // Use named mutex to ensure only one initializer
-        std::string mutex_name = shm_name + "$mutex";
-        HANDLE      hMutex     = CreateMutexA(NULL, FALSE, mutex_name.c_str());
-        if (!hMutex)
-        {
-            const DWORD err    = GetLastError();
-            last_error_message = GetLastErrorAsString(err);
-            status             = Status::MutexCreateError;
-            cleanup_partial();
-            return;
-        }
-
-        DWORD wait_result = WaitForSingleObject(hMutex, INFINITE);
-        if (wait_result != WAIT_OBJECT_0)
-        {
-            const DWORD err    = GetLastError();
-            last_error_message = GetLastErrorAsString(err);
-            status             = Status::MutexWaitError;
-            CloseHandle(hMutex);
-            cleanup_partial();
-            return;
-        }
-
-        // Crucially, we place the object first to ensure alignment.
-        volatile DWORD* is_initialized =
-          std::launder(reinterpret_cast<DWORD*>(reinterpret_cast<char*>(pMap) + sizeof(T)));
-        T* object = std::launder(reinterpret_cast<T*>(pMap));
-
-        if (*is_initialized != IS_INITIALIZED_VALUE)
-        {
-            // First time initialization, message for debug purposes
-            new (object) T{value};
-            *is_initialized = IS_INITIALIZED_VALUE;
-        }
-
-        BOOL release_result = ReleaseMutex(hMutex);
-        CloseHandle(hMutex);
-
-        if (!release_result)
-        {
-            const DWORD err    = GetLastError();
-            last_error_message = GetLastErrorAsString(err);
-            status             = Status::MutexReleaseError;
-            cleanup_partial();
-            return;
-        }
-
-        status = Status::Success;
-    }
-
-    void cleanup_partial() {
-        if (pMap != nullptr)
-        {
-            UnmapViewOfFile(pMap);
-            pMap = nullptr;
-        }
-        if (hMapFile)
-        {
-            CloseHandle(hMapFile);
-            hMapFile = 0;
-        }
-    }
-
-    void cleanup() {
-        if (pMap != nullptr)
-        {
-            UnmapViewOfFile(pMap);
-            pMap = nullptr;
-        }
-        if (hMapFile)
-        {
-            CloseHandle(hMapFile);
-            hMapFile = 0;
-        }
-    }
-
-    void*       pMap     = nullptr;
-    HANDLE      hMapFile = 0;
-    Status      status   = Status::NotInitialized;
-    std::string last_error_message;
-};
-
-#elif defined(USE_UNIX_SHM)
 
 template<typename T>
 class SharedMemoryBackend {
@@ -442,32 +122,6 @@ class SharedMemoryBackend {
    private:
     std::optional<shm::SharedMemory<T>> shm1;
 };
-
-#else
-
-// For systems that don't have shared memory, or support is troublesome.
-// The way fallback is done is that we need a dummy backend.
-
-template<typename T>
-class SharedMemoryBackend {
-   public:
-    SharedMemoryBackend() = default;
-
-    SharedMemoryBackend([[maybe_unused]] const std::string& shm_name,
-                        [[maybe_unused]] const T&           value) {}
-
-    void* get() const { return nullptr; }
-
-    bool is_valid() const { return false; }
-
-    SystemWideSharedConstantAllocationStatus get_status() const {
-        return SystemWideSharedConstantAllocationStatus::NoAllocation;
-    }
-
-    std::optional<std::string> get_error_message() const { return "Dummy SharedMemoryBackend"; }
-};
-
-#endif
 
 template<typename T>
 struct SharedMemoryBackendFallback {
@@ -536,7 +190,6 @@ struct SystemWideSharedConstant {
                       discriminator);
         std::string shm_name = buf;
 
-#if defined(USE_UNIX_SHM)
         // POSIX shared memory names must start with a slash
         shm_name = "/sf_" + createHashString(shm_name);
 
@@ -545,7 +198,6 @@ struct SystemWideSharedConstant {
         {
             shm_name = shm_name.substr(0, SF_MAX_SEM_NAME_LEN - 1);
         }
-#endif
 
         SharedMemoryBackend<T> shm_backend(shm_name, value);
 

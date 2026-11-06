@@ -31,28 +31,7 @@
 #include "../misc.h"
 #include "../types.h"
 
-#if defined(USE_AVX2)
-    #include <immintrin.h>
-
-#elif defined(USE_SSE41)
-    #include <smmintrin.h>
-
-#elif defined(USE_SSSE3)
-    #include <tmmintrin.h>
-
-#elif defined(USE_SSE2)
-    #include <emmintrin.h>
-
-#elif defined(USE_LASX)
-    #include <lasxintrin.h>
-    #include <lsxintrin.h>
-
-#elif defined(USE_LSX)
-    #include <lsxintrin.h>
-
-#elif defined(USE_NEON)
-    #include <arm_neon.h>
-#endif
+#include <immintrin.h>
 
 namespace Stockfish::Eval::NNUE {
 
@@ -101,59 +80,22 @@ constexpr IntType ceil_to_multiple(IntType n, IntType base) {
 }
 
 
-// Utility to read an integer (signed or unsigned, any size)
-// from a stream in little-endian order. We swap the byte order after the read if
-// necessary to return a result with the byte ordering of the compiling machine.
+// Read an integer from a little-endian stream on x86-64.
 template<typename IntType>
 inline IntType read_little_endian(std::istream& stream) {
     IntType result;
 
-    if (IsLittleEndian)
-        stream.read(reinterpret_cast<char*>(&result), sizeof(IntType));
-    else
-    {
-        u8                            u[sizeof(IntType)];
-        std::make_unsigned_t<IntType> v = 0;
-
-        stream.read(reinterpret_cast<char*>(u), sizeof(IntType));
-        for (usize i = 0; i < sizeof(IntType); ++i)
-            v = (v << 8) | u[sizeof(IntType) - i - 1];
-
-        std::memcpy(&result, &v, sizeof(IntType));
-    }
+    stream.read(reinterpret_cast<char*>(&result), sizeof(IntType));
 
     return result;
 }
 
 
-// Utility to write an integer (signed or unsigned, any size)
-// to a stream in little-endian order. We swap the byte order before the write if
-// necessary to always write in little-endian order, independently of the byte
-// ordering of the compiling machine.
+// Write an integer to a little-endian stream on x86-64.
 template<typename IntType>
 inline void write_little_endian(std::ostream& stream, IntType value) {
 
-    if (IsLittleEndian)
-        stream.write(reinterpret_cast<const char*>(&value), sizeof(IntType));
-    else
-    {
-        u8                            u[sizeof(IntType)];
-        std::make_unsigned_t<IntType> v = value;
-
-        usize i = 0;
-        // if constexpr to silence the warning about shift by 8
-        if constexpr (sizeof(IntType) > 1)
-        {
-            for (; i + 1 < sizeof(IntType); ++i)
-            {
-                u[i] = u8(v);
-                v >>= 8;
-            }
-        }
-        u[i] = u8(v);
-
-        stream.write(reinterpret_cast<char*>(u), sizeof(IntType));
-    }
+    stream.write(reinterpret_cast<const char*>(&value), sizeof(IntType));
 }
 
 
@@ -161,11 +103,7 @@ inline void write_little_endian(std::ostream& stream, IntType value) {
 // This reads N integers from stream s and puts them in array out.
 template<typename IntType>
 inline void read_little_endian(std::istream& stream, IntType* out, usize count) {
-    if (IsLittleEndian)
-        stream.read(reinterpret_cast<char*>(out), sizeof(IntType) * count);
-    else
-        for (usize i = 0; i < count; ++i)
-            out[i] = read_little_endian<IntType>(stream);
+    stream.read(reinterpret_cast<char*>(out), sizeof(IntType) * count);
 }
 
 
@@ -173,11 +111,7 @@ inline void read_little_endian(std::istream& stream, IntType* out, usize count) 
 // This takes N integers from array values and writes them on stream s.
 template<typename IntType>
 inline void write_little_endian(std::ostream& stream, const IntType* values, usize count) {
-    if (IsLittleEndian)
-        stream.write(reinterpret_cast<const char*>(values), sizeof(IntType) * count);
-    else
-        for (usize i = 0; i < count; ++i)
-            write_little_endian<IntType>(stream, values[i]);
+    stream.write(reinterpret_cast<const char*>(values), sizeof(IntType) * count);
 }
 
 

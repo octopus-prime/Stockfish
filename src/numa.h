@@ -44,33 +44,10 @@
 
 // We support linux very well, but we explicitly do NOT support Android,
 // because there is no affected systems, not worth maintaining.
-#if defined(__linux__) && !defined(__ANDROID__)
-    #if !defined(_GNU_SOURCE)
-        #define _GNU_SOURCE
-    #endif
-    #include <sched.h>
-#elif defined(_WIN64)
-
-    #if _WIN32_WINNT < 0x0601
-        #undef _WIN32_WINNT
-        #define _WIN32_WINNT 0x0601  // Force to include needed API prototypes
-    #endif
-
-    #if !defined(NOMINMAX)
-        #define NOMINMAX
-    #endif
-    #include <windows.h>
-    #if defined small
-        #undef small
-    #endif
-
-// https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-setthreadselectedcpusetmasks
-using SetThreadSelectedCpuSetMasks_t = BOOL (*)(HANDLE, PGROUP_AFFINITY, USHORT);
-
-// https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getthreadselectedcpusetmasks
-using GetThreadSelectedCpuSetMasks_t = BOOL (*)(HANDLE, PGROUP_AFFINITY, USHORT, PUSHORT);
-
+#if !defined(_GNU_SOURCE)
+    #define _GNU_SOURCE
 #endif
+#include <sched.h>
 
 namespace Stockfish {
 
@@ -83,332 +60,11 @@ inline CpuIndex get_hardware_concurrency() {
     // Get all processors across all processor groups on windows, since
     // hardware_concurrency() only returns the number of processors in
     // the first group, because only these are available to std::thread.
-#ifdef _WIN64
-    concurrency = std::max<CpuIndex>(concurrency, GetActiveProcessorCount(ALL_PROCESSOR_GROUPS));
-#endif
 
     return concurrency;
 }
 
 inline const CpuIndex SYSTEM_THREADS_NB = std::max<CpuIndex>(1, get_hardware_concurrency());
-
-#if defined(_WIN64)
-
-// On Windows each processor group can have up to 64 processors.
-// https://learn.microsoft.com/en-us/windows/win32/procthread/processor-groups
-static constexpr usize WIN_PROCESSOR_GROUP_SIZE = 64;
-
-struct WindowsAffinity {
-    std::optional<std::set<CpuIndex>> oldApi;
-    std::optional<std::set<CpuIndex>> newApi;
-
-    // We also provide diagnostic for when the affinity is set to nullopt
-    // whether it was due to being indeterminate. If affinity is indeterminate
-    // it is best to assume it is not set at all, so consistent with the meaning
-    // of the nullopt affinity.
-    bool isNewDeterminate = true;
-    bool isOldDeterminate = true;
-
-    std::optional<std::set<CpuIndex>> get_combined() const {
-        if (!oldApi.has_value())
-            return newApi;
-        if (!newApi.has_value())
-            return oldApi;
-
-        std::set<CpuIndex> intersect;
-        std::set_intersection(oldApi->begin(), oldApi->end(), newApi->begin(), newApi->end(),
-                              std::inserter(intersect, intersect.begin()));
-        return intersect;
-    }
-
-    // Since Windows 11 and Windows Server 2022 thread affinities can span
-    // processor groups and can be set as such by a new WinAPI function. However,
-    // we may need to force using the old API if we detect that the process has
-    // affinity set by the old API already and we want to override that. Due to the
-    // limitations of the old API we cannot detect its use reliably. There will be
-    // cases where we detect not use but it has actually been used and vice versa.
-
-    bool likely_used_old_api() const { return oldApi.has_value() || !isOldDeterminate; }
-};
-
-inline std::pair<BOOL, std::vector<USHORT>> get_process_group_affinity() {
-
-    // GetProcessGroupAffinity requires the GroupArray argument to be
-    // aligned to 4 bytes instead of just 2.
-    static constexpr usize GroupArrayMinimumAlignment = 4;
-    static_assert(GroupArrayMinimumAlignment >= alignof(USHORT));
-
-    // The function should succeed the second time, but it may fail if the group
-    // affinity has changed between GetProcessGroupAffinity calls. In such case
-    // we consider this a hard error, as we Cannot work with unstable affinities
-    // anyway.
-    static constexpr int MAX_TRIES  = 2;
-    USHORT               GroupCount = 1;
-    for (int i = 0; i < MAX_TRIES; ++i)
-    {
-        auto GroupArray = std::make_unique<USHORT[]>(
-          GroupCount + (GroupArrayMinimumAlignment / alignof(USHORT) - 1));
-
-        USHORT* GroupArrayAligned = align_ptr_up<GroupArrayMinimumAlignment>(GroupArray.get());
-
-        const BOOL status =
-          GetProcessGroupAffinity(GetCurrentProcess(), &GroupCount, GroupArrayAligned);
-
-        if (status == 0 && GetLastError() != ERROR_INSUFFICIENT_BUFFER)
-            break;
-
-        if (status != 0)
-            return std::make_pair(status,
-                                  std::vector(GroupArrayAligned, GroupArrayAligned + GroupCount));
-    }
-
-    return std::make_pair(0, std::vector<USHORT>());
-}
-
-// On Windows there are two ways to set affinity, and therefore 2 ways to get it.
-// These are not consistent, so we have to check both. In some cases it is actually
-// not possible to determine affinity. For example when two different threads have
-// affinity on different processor groups, set using SetThreadAffinityMask, we cannot
-// retrieve the actual affinities.
-// From documentation on GetProcessAffinityMask:
-//     > If the calling process contains threads in multiple groups,
-//     > the function returns zero for both affinity masks.
-// In such cases we just give up and assume we have affinity for all processors.
-// nullopt means no affinity is set, that is, all processors are allowed
-inline WindowsAffinity get_process_affinity() {
-    HMODULE k32                            = GetModuleHandle(TEXT("Kernel32.dll"));
-    auto    GetThreadSelectedCpuSetMasks_f = GetThreadSelectedCpuSetMasks_t(
-      (void (*)()) GetProcAddress(k32, "GetThreadSelectedCpuSetMasks"));
-
-    BOOL status = 0;
-
-    WindowsAffinity affinity;
-
-    if (GetThreadSelectedCpuSetMasks_f != nullptr)
-    {
-        USHORT RequiredMaskCount;
-        status = GetThreadSelectedCpuSetMasks_f(GetCurrentThread(), nullptr, 0, &RequiredMaskCount);
-
-        // We expect ERROR_INSUFFICIENT_BUFFER from GetThreadSelectedCpuSetMasks,
-        // but other failure is an actual error.
-        if (status == 0 && GetLastError() != ERROR_INSUFFICIENT_BUFFER)
-            affinity.isNewDeterminate = false;
-        else if (RequiredMaskCount > 0)
-        {
-            // If RequiredMaskCount then these affinities were never set, but it's
-            // not consistent so GetProcessAffinityMask may still return some affinity.
-            auto groupAffinities = std::make_unique<GROUP_AFFINITY[]>(RequiredMaskCount);
-
-            status = GetThreadSelectedCpuSetMasks_f(GetCurrentThread(), groupAffinities.get(),
-                                                    RequiredMaskCount, &RequiredMaskCount);
-
-            if (status == 0)
-                affinity.isNewDeterminate = false;
-            else
-            {
-                std::set<CpuIndex> cpus;
-
-                for (USHORT i = 0; i < RequiredMaskCount; ++i)
-                {
-                    const usize procGroupIndex = groupAffinities[i].Group;
-
-                    for (usize j = 0; j < WIN_PROCESSOR_GROUP_SIZE; ++j)
-                    {
-                        if (groupAffinities[i].Mask & (KAFFINITY(1) << j))
-                            cpus.insert(procGroupIndex * WIN_PROCESSOR_GROUP_SIZE + j);
-                    }
-                }
-
-                affinity.newApi = std::move(cpus);
-            }
-        }
-    }
-
-    // NOTE: There is no way to determine full affinity using the old API if
-    //       individual threads set affinity on different processor groups.
-
-    DWORD_PTR proc, sys;
-    status = GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys);
-
-    // If proc == 0 then we cannot determine affinity because it spans processor groups.
-    // On Windows 11 and Server 2022 it will instead
-    //     > If, however, hHandle specifies a handle to the current process, the function
-    //     > always uses the calling thread's primary group (which by default is the same
-    //     > as the process' primary group) in order to set the
-    //     > lpProcessAffinityMask and lpSystemAffinityMask.
-    // So it will never be indeterminate here. We can only make assumptions later.
-    if (status == 0 || proc == 0)
-    {
-        affinity.isOldDeterminate = false;
-        return affinity;
-    }
-
-    // If SetProcessAffinityMask was never called the affinity must span
-    // all processor groups, but if it was called it must only span one.
-
-    std::vector<USHORT> groupAffinity;  // We need to capture this later and capturing
-                                        // from structured bindings requires c++20.
-
-    std::tie(status, groupAffinity) = get_process_group_affinity();
-    if (status == 0)
-    {
-        affinity.isOldDeterminate = false;
-        return affinity;
-    }
-
-    if (groupAffinity.size() == 1)
-    {
-        // We detect the case when affinity is set to all processors and correctly
-        // leave affinity.oldApi as nullopt.
-        if (GetActiveProcessorGroupCount() != 1 || proc != sys)
-        {
-            std::set<CpuIndex> cpus;
-
-            const usize procGroupIndex = groupAffinity[0];
-
-            const u64 mask = static_cast<u64>(proc);
-            for (usize j = 0; j < WIN_PROCESSOR_GROUP_SIZE; ++j)
-            {
-                if (mask & (KAFFINITY(1) << j))
-                    cpus.insert(procGroupIndex * WIN_PROCESSOR_GROUP_SIZE + j);
-            }
-
-            affinity.oldApi = std::move(cpus);
-        }
-    }
-    else
-    {
-        // If we got here it means that either SetProcessAffinityMask was never set
-        // or we're on Windows 11/Server 2022.
-
-        // Since Windows 11 and Windows Server 2022 the behaviour of
-        // GetProcessAffinityMask changed:
-        //     > If, however, hHandle specifies a handle to the current process,
-        //     > the function always uses the calling thread's primary group
-        //     > (which by default is the same as the process' primary group)
-        //     > in order to set the lpProcessAffinityMask and lpSystemAffinityMask.
-        // In which case we can actually retrieve the full affinity.
-
-        if (GetThreadSelectedCpuSetMasks_f != nullptr)
-        {
-            NativeThread th = create_native_thread(NativeThreadOptions{}, [&]() {
-                std::set<CpuIndex> cpus;
-                bool               isAffinityFull = true;
-
-                for (auto procGroupIndex : groupAffinity)
-                {
-                    const int numActiveProcessors =
-                      GetActiveProcessorCount(static_cast<WORD>(procGroupIndex));
-
-                    // We have to schedule to two different processors
-                    // and & the affinities we get. Otherwise our processor
-                    // choice could influence the resulting affinity.
-                    // We assume the processor IDs within the group are
-                    // filled sequentially from 0.
-                    u64 procCombined = std::numeric_limits<u64>::max();
-                    u64 sysCombined  = std::numeric_limits<u64>::max();
-
-                    for (int i = 0; i < std::min(numActiveProcessors, 2); ++i)
-                    {
-                        GROUP_AFFINITY GroupAffinity;
-                        std::memset(&GroupAffinity, 0, sizeof(GROUP_AFFINITY));
-                        GroupAffinity.Group = static_cast<WORD>(procGroupIndex);
-
-                        GroupAffinity.Mask = static_cast<KAFFINITY>(1) << i;
-
-                        status =
-                          SetThreadGroupAffinity(GetCurrentThread(), &GroupAffinity, nullptr);
-                        if (status == 0)
-                        {
-                            affinity.isOldDeterminate = false;
-                            return;
-                        }
-
-                        SwitchToThread();
-
-                        DWORD_PTR proc2, sys2;
-                        status = GetProcessAffinityMask(GetCurrentProcess(), &proc2, &sys2);
-                        if (status == 0)
-                        {
-                            affinity.isOldDeterminate = false;
-                            return;
-                        }
-
-                        procCombined &= static_cast<u64>(proc2);
-                        sysCombined &= static_cast<u64>(sys2);
-                    }
-
-                    if (procCombined != sysCombined)
-                        isAffinityFull = false;
-
-                    for (usize j = 0; j < WIN_PROCESSOR_GROUP_SIZE; ++j)
-                    {
-                        if (procCombined & (KAFFINITY(1) << j))
-                            cpus.insert(procGroupIndex * WIN_PROCESSOR_GROUP_SIZE + j);
-                    }
-                }
-
-                // We have to detect the case where the affinity was not set,
-                // or is set to all processors so that we correctly produce as
-                // std::nullopt result.
-                if (!isAffinityFull)
-                    affinity.oldApi = std::move(cpus);
-            });
-
-            th.join();
-        }
-    }
-
-    return affinity;
-}
-
-// Type machinery used to emulate Cache->GroupCount
-
-template<typename T, typename = void>
-struct HasGroupCount: std::false_type {};
-
-template<typename T>
-struct HasGroupCount<T, std::void_t<decltype(std::declval<T>().Cache.GroupCount)>>: std::true_type {
-};
-
-template<typename T, typename Pred, std::enable_if_t<HasGroupCount<T>::value, bool> = true>
-std::set<CpuIndex> readCacheMembers(const T* info, Pred&& is_cpu_allowed) {
-    std::set<CpuIndex> cpus;
-    // On Windows 10 this will read a 0 because GroupCount doesn't exist
-    int groupCount = std::max(info->Cache.GroupCount, WORD(1));
-    for (WORD procGroup = 0; procGroup < groupCount; ++procGroup)
-    {
-        for (BYTE number = 0; number < WIN_PROCESSOR_GROUP_SIZE; ++number)
-        {
-            WORD           groupNumber = info->Cache.GroupMasks[procGroup].Group;
-            const CpuIndex c = static_cast<CpuIndex>(groupNumber) * WIN_PROCESSOR_GROUP_SIZE
-                             + static_cast<CpuIndex>(number);
-            if (!(info->Cache.GroupMasks[procGroup].Mask & (1ULL << number)) || !is_cpu_allowed(c))
-                continue;
-            cpus.insert(c);
-        }
-    }
-    return cpus;
-}
-
-template<typename T, typename Pred, std::enable_if_t<!HasGroupCount<T>::value, bool> = true>
-std::set<CpuIndex> readCacheMembers(const T* info, Pred&& is_cpu_allowed) {
-    std::set<CpuIndex> cpus;
-    for (BYTE number = 0; number < WIN_PROCESSOR_GROUP_SIZE; ++number)
-    {
-        WORD           groupNumber = info->Cache.GroupMask.Group;
-        const CpuIndex c           = static_cast<CpuIndex>(groupNumber) * WIN_PROCESSOR_GROUP_SIZE
-                         + static_cast<CpuIndex>(number);
-        if (!(info->Cache.GroupMask.Mask & (1ULL << number)) || !is_cpu_allowed(c))
-            continue;
-        cpus.insert(c);
-    }
-    return cpus;
-}
-
-#endif
-
-#if defined(__linux__) && !defined(__ANDROID__)
 
 inline std::set<CpuIndex> get_process_affinity() {
 
@@ -451,19 +107,7 @@ inline std::set<CpuIndex> get_process_affinity() {
     return cpus;
 }
 
-#endif
-
-#if defined(__linux__) && !defined(__ANDROID__)
-
 inline static const auto STARTUP_PROCESSOR_AFFINITY = get_process_affinity();
-
-#elif defined(_WIN64)
-
-inline static const auto STARTUP_PROCESSOR_AFFINITY = get_process_affinity();
-inline static const auto STARTUP_USE_OLD_AFFINITY_API =
-  STARTUP_PROCESSOR_AFFINITY.likely_used_old_api();
-
-#endif
 
 // We want to abstract the purpose of storing the numa node index somewhat.
 // Whoever is using this does not need to know the specifics of the replication
@@ -535,29 +179,6 @@ class NumaConfig {
                                   bool respectProcessAffinity = true) {
         NumaConfig cfg = empty();
 
-#if !((defined(__linux__) && !defined(__ANDROID__)) || defined(_WIN64))
-        // Fallback for unsupported systems.
-        for (CpuIndex c = 0; c < SYSTEM_THREADS_NB; ++c)
-            cfg.add_cpu_to_node(NumaIndex{0}, c);
-#else
-
-    #if defined(_WIN64)
-
-        std::optional<std::set<CpuIndex>> allowedCpus;
-
-        if (respectProcessAffinity)
-            allowedCpus = STARTUP_PROCESSOR_AFFINITY.get_combined();
-
-        // The affinity cannot be determined in all cases on Windows,
-        // but we at least guarantee that the number of allowed processors
-        // is >= number of processors in the affinity mask. In case the user
-        // is not satisfied they must set the processor numbers explicitly.
-        auto is_cpu_allowed = [&allowedCpus](CpuIndex c) {
-            return !allowedCpus.has_value() || allowedCpus->count(c) == 1;
-        };
-
-    #elif defined(__linux__) && !defined(__ANDROID__)
-
         std::set<CpuIndex> allowedCpus;
 
         if (respectProcessAffinity)
@@ -566,8 +187,6 @@ class NumaConfig {
         auto is_cpu_allowed = [respectProcessAffinity, &allowedCpus](CpuIndex c) {
             return !respectProcessAffinity || allowedCpus.count(c) == 1;
         };
-
-    #endif
 
         bool l3Success = false;
         if (!std::holds_alternative<SystemNumaPolicy>(policy))
@@ -584,57 +203,6 @@ class NumaConfig {
         }
         if (!l3Success)
             cfg = from_system_numa(respectProcessAffinity, is_cpu_allowed);
-
-    #if defined(_WIN64)
-        // Split the NUMA nodes to be contained within a group if necessary.
-        // This is needed between Windows 10 Build 20348 and Windows 11, because
-        // the new NUMA allocation behaviour was introduced while there was
-        // still no way to set thread affinity spanning multiple processor groups.
-        // See https://learn.microsoft.com/en-us/windows/win32/procthread/numa-support
-        // We also do this is if need to force old API for some reason.
-        //
-        // 2024-08-26: It appears that we need to actually always force this behaviour.
-        // While Windows allows this to work now, such assignments have bad interaction
-        // with the scheduler - in particular it still prefers scheduling on the thread's
-        // "primary" node, even if it means scheduling SMT processors first.
-        // See https://github.com/official-stockfish/Stockfish/issues/5551
-        // See https://learn.microsoft.com/en-us/windows/win32/procthread/processor-groups
-        //
-        //     Each process is assigned a primary group at creation, and by default all
-        //     of its threads' primary group is the same. Each thread's ideal processor
-        //     is in the thread's primary group, so threads will preferentially be
-        //     scheduled to processors on their primary group, but they are able to
-        //     be scheduled to processors on any other group.
-        //
-        // used to be guarded by if (STARTUP_USE_OLD_AFFINITY_API)
-        {
-            NumaConfig splitCfg = empty();
-
-            NumaIndex splitNodeIndex = 0;
-            for (const auto& cpus : cfg.nodes)
-            {
-                if (cpus.empty())
-                    continue;
-
-                usize lastProcGroupIndex = *(cpus.begin()) / WIN_PROCESSOR_GROUP_SIZE;
-                for (CpuIndex c : cpus)
-                {
-                    const usize procGroupIndex = c / WIN_PROCESSOR_GROUP_SIZE;
-                    if (procGroupIndex != lastProcGroupIndex)
-                    {
-                        splitNodeIndex += 1;
-                        lastProcGroupIndex = procGroupIndex;
-                    }
-                    splitCfg.add_cpu_to_node(splitNodeIndex, c);
-                }
-                splitNodeIndex += 1;
-            }
-
-            cfg = std::move(splitCfg);
-        }
-    #endif
-
-#endif
 
         // We have to ensure no empty NUMA nodes persist.
         cfg.remove_empty_numa_nodes();
@@ -824,8 +392,6 @@ class NumaConfig {
         if (n >= nodes.size() || nodes[n].empty())
             std::exit(EXIT_FAILURE);
 
-#if defined(__linux__) && !defined(__ANDROID__)
-
         cpu_set_t* mask = CPU_ALLOC(highestCpuIndex + 1);
         if (mask == nullptr)
             std::exit(EXIT_FAILURE);
@@ -847,97 +413,6 @@ class NumaConfig {
         // We yield this thread just to be sure it gets rescheduled.
         // This is defensive, allowed because this code is not performance critical.
         sched_yield();
-
-#elif defined(_WIN64)
-
-        // Requires Windows 11. No good way to set thread affinity spanning
-        // processor groups before that.
-        HMODULE k32                            = GetModuleHandle(TEXT("Kernel32.dll"));
-        auto    SetThreadSelectedCpuSetMasks_f = SetThreadSelectedCpuSetMasks_t(
-          (void (*)()) GetProcAddress(k32, "SetThreadSelectedCpuSetMasks"));
-
-        // We ALWAYS set affinity with the new API if available, because
-        // there's no downsides, and we forcibly keep it consistent with
-        // the old API should we need to use it. I.e. we always keep this
-        // as a superset of what we set with SetThreadGroupAffinity.
-        if (SetThreadSelectedCpuSetMasks_f != nullptr)
-        {
-            // Only available on Windows 11 and Windows Server 2022 onwards
-            const USHORT numProcGroups = USHORT(
-              ((highestCpuIndex + 1) + WIN_PROCESSOR_GROUP_SIZE - 1) / WIN_PROCESSOR_GROUP_SIZE);
-            auto groupAffinities = std::make_unique<GROUP_AFFINITY[]>(numProcGroups);
-            std::memset(groupAffinities.get(), 0, sizeof(GROUP_AFFINITY) * numProcGroups);
-            for (WORD i = 0; i < numProcGroups; ++i)
-                groupAffinities[i].Group = i;
-
-            for (CpuIndex c : nodes[n])
-            {
-                const usize procGroupIndex     = c / WIN_PROCESSOR_GROUP_SIZE;
-                const usize idxWithinProcGroup = c % WIN_PROCESSOR_GROUP_SIZE;
-                groupAffinities[procGroupIndex].Mask |= KAFFINITY(1) << idxWithinProcGroup;
-            }
-
-            HANDLE hThread = GetCurrentThread();
-
-            const BOOL status =
-              SetThreadSelectedCpuSetMasks_f(hThread, groupAffinities.get(), numProcGroups);
-            if (status == 0)
-                std::exit(EXIT_FAILURE);
-
-            // We yield this thread just to be sure it gets rescheduled.
-            // This is defensive, allowed because this code is not performance critical.
-            SwitchToThread();
-        }
-
-        // Sometimes we need to force the old API, but do not use it unless necessary.
-        if (SetThreadSelectedCpuSetMasks_f == nullptr || STARTUP_USE_OLD_AFFINITY_API)
-        {
-            // On earlier windows version (since windows 7) we cannot run a single thread
-            // on multiple processor groups, so we need to restrict the group.
-            // We assume the group of the first processor listed for this node.
-            // Processors from outside this group will not be assigned for this thread.
-            // Normally this won't be an issue because windows used to assign NUMA nodes
-            // such that they cannot span processor groups. However, since Windows 10
-            // Build 20348 the behaviour changed, so there's a small window of versions
-            // between this and Windows 11 that might exhibit problems with not all
-            // processors being utilized.
-            //
-            // We handle this in NumaConfig::from_system by manually splitting the
-            // nodes when we detect that there is no function to set affinity spanning
-            // processor nodes. This is required because otherwise our thread distribution
-            // code may produce suboptimal results.
-            //
-            // See https://learn.microsoft.com/en-us/windows/win32/procthread/numa-support
-            GROUP_AFFINITY affinity;
-            std::memset(&affinity, 0, sizeof(GROUP_AFFINITY));
-            // We use an ordered set to be sure to get the smallest cpu number here.
-            const usize forcedProcGroupIndex = *(nodes[n].begin()) / WIN_PROCESSOR_GROUP_SIZE;
-            affinity.Group                   = static_cast<WORD>(forcedProcGroupIndex);
-            for (CpuIndex c : nodes[n])
-            {
-                const usize procGroupIndex     = c / WIN_PROCESSOR_GROUP_SIZE;
-                const usize idxWithinProcGroup = c % WIN_PROCESSOR_GROUP_SIZE;
-                // We skip processors that are not in the same processor group.
-                // If everything was set up correctly this will never be an issue,
-                // but we have to account for bad NUMA node specification.
-                if (procGroupIndex != forcedProcGroupIndex)
-                    continue;
-
-                affinity.Mask |= KAFFINITY(1) << idxWithinProcGroup;
-            }
-
-            HANDLE hThread = GetCurrentThread();
-
-            const BOOL status = SetThreadGroupAffinity(hThread, &affinity, nullptr);
-            if (status == 0)
-                std::exit(EXIT_FAILURE);
-
-            // We yield this thread just to be sure it gets rescheduled. This is
-            // defensive, allowed because this code is not performance critical.
-            SwitchToThread();
-        }
-
-#endif
 
         return NumaReplicatedAccessToken(n);
     }
@@ -1061,14 +536,11 @@ class NumaConfig {
 
     // This function queries the system for the mapping of processors to NUMA nodes.
     // On Linux we read from standardized kernel sysfs, with a fallback to single NUMA
-    // node. On Windows we utilize GetNumaProcessorNodeEx, which has its quirks, see
-    // comment for Windows implementation of get_process_affinity.
+    // node.
     template<typename Pred>
     static NumaConfig from_system_numa([[maybe_unused]] bool   respectProcessAffinity,
                                        [[maybe_unused]] Pred&& is_cpu_allowed) {
         NumaConfig cfg = empty();
-
-#if defined(__linux__) && !defined(__ANDROID__)
 
         // On Linux things are straightforward, since there's no processor groups and
         // any thread can be scheduled on all processors.
@@ -1121,36 +593,6 @@ class NumaConfig {
                     cfg.add_cpu_to_node(NumaIndex{0}, c);
         }
 
-#elif defined(_WIN64)
-
-        WORD numProcGroups = GetActiveProcessorGroupCount();
-        for (WORD procGroup = 0; procGroup < numProcGroups; ++procGroup)
-        {
-            for (BYTE number = 0; number < WIN_PROCESSOR_GROUP_SIZE; ++number)
-            {
-                PROCESSOR_NUMBER procnum;
-                procnum.Group    = procGroup;
-                procnum.Number   = number;
-                procnum.Reserved = 0;
-                USHORT nodeNumber;
-
-                const BOOL     status = GetNumaProcessorNodeEx(&procnum, &nodeNumber);
-                const CpuIndex c      = static_cast<CpuIndex>(procGroup) * WIN_PROCESSOR_GROUP_SIZE
-                                 + static_cast<CpuIndex>(number);
-                if (status != 0 && nodeNumber != std::numeric_limits<USHORT>::max()
-                    && is_cpu_allowed(c))
-                {
-                    cfg.add_cpu_to_node(nodeNumber, c);
-                }
-            }
-        }
-
-#else
-
-        abort();  // should not reach here
-
-#endif
-
         return cfg;
     }
 
@@ -1162,8 +604,6 @@ class NumaConfig {
         NumaConfig systemConfig =
           NumaConfig::from_system(SystemNumaPolicy{}, respectProcessAffinity);
         std::vector<L3Domain> l3Domains;
-
-#if defined(__linux__) && !defined(__ANDROID__)
 
         std::set<CpuIndex> seenCpus;
 
@@ -1192,37 +632,6 @@ class NumaConfig {
             if (!domain.cpus.empty())
                 l3Domains.emplace_back(std::move(domain));
         }
-
-#elif defined(_WIN64)
-
-        DWORD bufSize = 0;
-        GetLogicalProcessorInformationEx(RelationCache, nullptr, &bufSize);
-        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER)
-            return std::nullopt;
-
-        std::vector<char> buffer(bufSize);
-        auto info = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buffer.data());
-        if (!GetLogicalProcessorInformationEx(RelationCache, info, &bufSize))
-            return std::nullopt;
-
-        while (reinterpret_cast<char*>(info) < buffer.data() + bufSize)
-        {
-            info = std::launder(info);
-            if (info->Relationship == RelationCache && info->Cache.Level == 3)
-            {
-                L3Domain domain{};
-                domain.cpus = readCacheMembers(info, is_cpu_allowed);
-                if (!domain.cpus.empty())
-                {
-                    domain.systemNumaIndex = systemConfig.nodeByCpu.at(*domain.cpus.begin());
-                    l3Domains.push_back(std::move(domain));
-                }
-            }
-            // Variable length data structure, advance to next
-            info = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(
-              reinterpret_cast<char*>(info) + info->Size);
-        }
-#endif
 
         if (!l3Domains.empty())
             return {NumaConfig::from_l3_info(std::move(l3Domains), bundleSize)};

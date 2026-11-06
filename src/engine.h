@@ -45,7 +45,7 @@
 
 namespace Stockfish {
 
-constexpr int MaxHashMB = Is64Bit ? 33554432 : 2048;
+constexpr int MaxHashMB = 33554432;
 extern int    MaxThreads;
 
 class Engine {

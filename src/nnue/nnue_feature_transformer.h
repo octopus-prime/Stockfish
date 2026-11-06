@@ -107,26 +107,15 @@ class FeatureTransformer {
     // be permuted so that calling packus on adjacent vectors of 16-bit
     // integers loaded from the data results in the pre-permutation order
     static constexpr auto PackusEpi16Order = []() -> std::array<usize, 8> {
-#if defined(USE_AVX512)
         // _mm512_packus_epi16 after permutation:
         // |   0   |   2   |   4   |   6   | // Vector 0
         // |   1   |   3   |   5   |   7   | // Vector 1
         // | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | // Packed Result
         return {0, 2, 4, 6, 1, 3, 5, 7};
-#elif defined(USE_AVX2) || defined(USE_LASX)
-        // _mm256_packus_epi16 after permutation:
-        // |   0   |   2   |  |   4   |   6   | // Vector 0, 2
-        // |   1   |   3   |  |   5   |   7   | // Vector 1, 3
-        // | 0 | 1 | 2 | 3 |  | 4 | 5 | 6 | 7 | // Packed Result
-        return {0, 2, 1, 3, 4, 6, 5, 7};
-#else
-        return {0, 1, 2, 3, 4, 5, 6, 7};
-#endif
     }();
 
     static constexpr auto InversePackusEpi16Order = invert_permutation(PackusEpi16Order);
 
-#if defined(USE_PAIRED_WIDENING_ADD)
     // The int8 weight rows are consumed one full vector register (sizeof(vec_t)
     // bytes) at a time: unpack{lo,hi}_epi8 interleave the bytes of two rows and
     // maddubs against a vector of ones sums each pair into an int16 lane. Both
@@ -144,7 +133,6 @@ class FeatureTransformer {
     }();
 
     static constexpr auto InverseWideningPairOrder = invert_permutation(WideningPairOrder);
-#endif
 
     static constexpr u32 combine_hash(std::initializer_list<u32> hashes) {
         u32 hash = 0;
@@ -169,24 +157,20 @@ class FeatureTransformer {
 
         permute<8>(threatAndPpWeights, PackusEpi16Order);
 
-#if defined(USE_PAIRED_WIDENING_ADD)
         // With 128-bit vectors the order is the identity
         if constexpr (sizeof(SIMD::vec_t) > 16)
         {
             permute<8>(weights, WideningPairOrder);
             permute<8>(threatAndPpWeights, WideningPairOrder);
         }
-#endif
     }
 
     void unpermute_weights() {
-#if defined(USE_PAIRED_WIDENING_ADD)
         if constexpr (sizeof(SIMD::vec_t) > 16)
         {
             permute<8>(weights, InverseWideningPairOrder);
             permute<8>(threatAndPpWeights, InverseWideningPairOrder);
         }
-#endif
 
         permute<16>(biases, InversePackusEpi16Order);
         permute<8>(weights, InversePackusEpi16Order);
@@ -268,16 +252,14 @@ class FeatureTransformer {
         using namespace SIMD;
         const IndexType offset = (HalfDimensions / 2) * perspective;
 
-#if defined(VECTOR)
-
         [[maybe_unused]] auto cursor = nnzInfo.make_cursor(perspective);
 
         constexpr IndexType OutputChunkSize = MaxChunkSize;
         static_assert((HalfDimensions / 2) % OutputChunkSize == 0);
         constexpr IndexType NumOutputChunks = HalfDimensions / 2 / OutputChunkSize;
 
-        [[maybe_unused]] const vec_t   Zero  = vec_zero();
-        [[maybe_unused]] const vec_t   FtMax = vec_set_16(FtMaxVal);
+        [[maybe_unused]] const vec_t   Zero  = _mm512_setzero_epi32();
+        [[maybe_unused]] const vec_t   FtMax = _mm512_set1_epi16(FtMaxVal);
         [[maybe_unused]] constexpr int shift = 7;
 
         const vec_t* in0 = reinterpret_cast<const vec_t*>(&accumulation[0]);
@@ -291,7 +273,7 @@ class FeatureTransformer {
         // one int8 vector. However, there exists a faster way.
 
         // The idea here is to use the implicit clipping from packus to
-        // save us two vec_max_16 instructions. This clipping works due
+        // save us two _mm512_max_epi16 instructions. This clipping works due
         // to the fact that any int16 integer below zero will be zeroed
         // on packus.
 
@@ -330,104 +312,23 @@ class FeatureTransformer {
 
                 static_assert(FtMaxVal == 255);
 
-    #if defined(USE_NEON)
-                uint16x8_t mul0 = vmull_u8(vqmovun_s16(acc0a), vqmovun_s16(acc1a));
-                uint16x8_t mul1 = vmull_u8(vqmovun_s16(acc0b), vqmovun_s16(acc1b));
+                vec_t sum0a =
+                  _mm512_slli_epi16(_mm512_max_epi16(_mm512_min_epi16(acc0a, FtMax), Zero), shift);
+                vec_t sum0b =
+                  _mm512_slli_epi16(_mm512_max_epi16(_mm512_min_epi16(acc0b, FtMax), Zero), shift);
+                vec_t sum1a = _mm512_min_epi16(acc1a, FtMax);
+                vec_t sum1b = _mm512_min_epi16(acc1b, FtMax);
 
-                uint8x16x2_t uzp = vuzpq_u8(vreinterpretq_u8_u16(mul0), vreinterpretq_u8_u16(mul1));
-                uint8x16_t   pab = vshrq_n_u8(uzp.val[1], 1);
-                vec_t        result = reinterpret_cast<vec_t>(pab);
-    #elif defined(USE_LSX) || defined(USE_LASX)
-                vec_t pa = vec_packus_16(acc0a, acc0b);
-                vec_t pb = vec_packus_16(acc1a, acc1b);
+                vec_t pa = _mm512_mulhi_epi16(sum0a, sum1a);
+                vec_t pb = _mm512_mulhi_epi16(sum0b, sum1b);
 
-                vec_t hi     = vec_mulhi_8(pa, pb);
-                vec_t result = vec_srli_8(hi, 1);
-    #elif defined(__wasm__)
-                // _mm_mulhi_epi16 is lowered to 32-bit multiplies, so we take
-                // a similar approach as the NEON path.
-                vec_t mul0 = vec_packus_16(acc0a, acc0b);
-                vec_t mul1 = vec_packus_16(acc1a, acc1b);
-
-                vec_t low = wasm_u16x8_extmul_low_u8x16(mul0, mul1);
-                vec_t hi  = wasm_u16x8_extmul_high_u8x16(mul0, mul1);
-
-                // equivalent to vuzp2_u8
-                vec_t merged = wasm_i8x16_shuffle(low, hi, 1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21,
-                                                  23, 25, 27, 29, 31);
-                vec_t result = wasm_u8x16_shr(merged, 1);
-    #else
-                vec_t sum0a = vec_slli_16(vec_max_16(vec_min_16(acc0a, FtMax), Zero), shift);
-                vec_t sum0b = vec_slli_16(vec_max_16(vec_min_16(acc0b, FtMax), Zero), shift);
-                vec_t sum1a = vec_min_16(acc1a, FtMax);
-                vec_t sum1b = vec_min_16(acc1b, FtMax);
-
-                vec_t pa = vec_mulhi_16(sum0a, sum1a);
-                vec_t pb = vec_mulhi_16(sum0b, sum1b);
-
-                vec_t result = vec_packus_16(pa, pb);
-    #endif
+                vec_t result = _mm512_packus_epi16(pa, pb);
 
                 packed[k] = out[j + k] = result;
             }
 
             cursor.record2(packed[0], packed[1]);
         }
-
-#elif defined(USE_RVV)
-
-        usize       j  = 0;
-        usize       VL = __riscv_vsetvlmax_e8m1();
-        vuint8m1_t  vid8;
-        vuint16m2_t vid16;
-        if (VL <= 256)
-            vid8 = __riscv_vid_v_u8m1(VL);
-        else
-            vid16 = __riscv_vid_v_u16m2(VL);
-
-        for (usize vl; j < HalfDimensions / 2; j += vl)
-        {
-            vl = __riscv_vsetvl_e16m2(HalfDimensions / 2 - j);
-
-            vint16m2_t acc0 = __riscv_vle16_v_i16m2(&accumulation[j], vl);
-            vint16m2_t acc1 = __riscv_vle16_v_i16m2(&accumulation[j + HalfDimensions / 2], vl);
-
-            acc0 = __riscv_vmax(acc0, 0, vl);
-            acc1 = __riscv_vmax(acc1, 0, vl);
-
-            vuint8m1_t pa = __riscv_vnclipu(__riscv_vreinterpret_u16m2(acc0), 0, 0, vl);
-            vuint8m1_t pb = __riscv_vnclipu(__riscv_vreinterpret_u16m2(acc1), 0, 0, vl);
-
-            vuint8m1_t hi     = __riscv_vmulhu(pa, pb, vl);
-            vuint8m1_t result = __riscv_vsrl(hi, 1, vl);
-
-            __riscv_vse8(&output[offset + j], result, vl);
-
-            vbool8_t    m   = __riscv_vmsne(result, 0, vl);
-            usize       cnt = __riscv_vcpop(m, vl);
-            vuint16m2_t vidx;
-            if (VL <= 256)
-                vidx = __riscv_vzext_vf2(__riscv_vcompress(vid8, m, vl), cnt);
-            else
-                vidx = __riscv_vcompress(vid16, m, vl);
-            __riscv_vse16(&nnzInfo.nnz[nnzInfo.count], __riscv_vadd(vidx, offset + j, cnt), cnt);
-            nnzInfo.count += cnt;
-        }
-
-#else
-
-        for (IndexType j = 0; j < HalfDimensions / 2; ++j)
-        {
-            BiasType sum0 = accumulation[j];
-            BiasType sum1 = accumulation[j + HalfDimensions / 2];
-
-            sum0 = std::clamp<BiasType>(sum0, 0, FtMaxVal);
-            sum1 = std::clamp<BiasType>(sum1, 0, FtMaxVal);
-
-            output[offset + j] = static_cast<OutputType>(unsigned(sum0 * sum1) / 512);
-        }
-
-#endif
     }
 
    public:

@@ -41,7 +41,6 @@ static constexpr IndexType pp_idx(IndexType a, IndexType b) {
     return hi * (hi - 1) / 2 + lo + PP_3Wide::IndexBase;
 }
 
-#ifdef USE_AVX512ICL
 static inline __m256i pp_idx_epi16(__m256i a, __m256i b) {
     const __m256i hi   = _mm256_max_epu16(a, b);
     const __m256i lo   = _mm256_min_epu16(a, b);
@@ -49,7 +48,6 @@ static inline __m256i pp_idx_epi16(__m256i a, __m256i b) {
     return _mm256_add_epi16(_mm256_add_epi16(_mm256_srli_epi16(prod, 1), lo),
                             _mm256_set1_epi16(i16(PP_3Wide::IndexBase)));
 }
-#endif
 
 sf_always_inline IndexType PP_3Wide::make_index(
   Color perspective, Color color, Square from, Square to, Color pairedColor, Square ksq) {
@@ -86,7 +84,6 @@ static void append_indices_impl(Color perspective,
     for (usize i = 0; i < N; ++i)
         orientation[i] = OrientTBL[ksq[i]] ^ u8(56 * (perspective ^ i));
 
-#ifdef USE_AVX512ICL
     __m512i ids[N];
     for (usize i = 0; i < N; ++i)
     {
@@ -95,7 +92,6 @@ static void append_indices_impl(Color perspective,
           _mm512_xor_si512(AllSquares, _mm512_set1_epi8(orientation[i])), _mm512_set1_epi8(8));
         ids[i] = _mm512_mask_add_epi8(adjusted, enemy, adjusted, _mm512_set1_epi8(48));
     }
-#endif
 
     // Enumerate changed pawns and their partners once for all requested perspectives.
     const Bitboard unchanged = (pawnsW | pawnsB) & ~updated;
@@ -106,7 +102,6 @@ static void append_indices_impl(Color perspective,
         if (!partners)
             continue;
 
-#ifdef USE_AVX512ICL
         const int n = popcount(partners);
         assert(n <= 16);
 
@@ -123,31 +118,6 @@ static void append_indices_impl(Color perspective,
             // including the 15 extra lanes written by an unmasked store.
             _mm256_storeu_epi16(out[i]->make_space(n), feats);
         }
-#else
-        const Color aCol = (pawnsB & a) ? BLACK : WHITE;
-        IndexType   aId[N];
-        for (usize i = 0; i < N; ++i)
-            aId[i] = make_pawn_id(Color(aCol ^ perspective ^ i), Square(u8(a) ^ orientation[i]));
-
-        auto push = [&](Square to, Color pairedColor) {
-            for (usize i = 0; i < N; ++i)
-            {
-                const IndexType bId   = make_pawn_id(Color(pairedColor ^ perspective ^ i),
-                                                     Square(u8(to) ^ orientation[i]));
-                const IndexType index = pp_idx(aId[i], bId);
-                if (prefetchBase)
-                    prefetch<PrefetchRw::READ, PrefetchLoc::LOW>(
-                      reinterpret_cast<const void*>(reinterpret_cast<uintptr_t>(prefetchBase)
-                                                    + uintptr_t(index) * prefetchStride));
-                out[i]->push_back(index);
-            }
-        };
-
-        for (Bitboard pb = pawnsB & partners; pb;)
-            push(pop_lsb(pb), BLACK);
-        for (Bitboard pw = pawnsW & partners; pw;)
-            push(pop_lsb(pw), WHITE);
-#endif
     }
 }
 

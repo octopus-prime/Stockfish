@@ -1,6 +1,6 @@
 # This workflow will run clang-format and comment on the PR.
 # Because of security reasons, it is crucial that this workflow
-# executes no shell script nor runs make.
+# executes no shell script nor runs a build.
 # Read this before editing: https://securitylab.github.com/research/github-actions-preventing-pwn-requests/
 
 name: Clang-Format
@@ -8,6 +8,7 @@ on:
   pull_request_target:
     branches:
       - "master"
+      - "ryzen-avx512-cmake"
     paths:
       - "**.cpp"
       - "**.h"
@@ -34,7 +35,6 @@ jobs:
         continue-on-error: true
         with:
           clang-format-version: "20"
-          exclude-regex: "incbin"
 
       - name: Comment on PR
         if: steps.clang-format.outcome == 'failure'

@@ -2,10 +2,10 @@ name: "CodeQL"
 
 on:
   push:
-    branches: ["master"]
+    branches: ["ryzen-avx512-cmake"]
   pull_request:
     # The branches below must be a subset of the branches above
-    branches: ["master"]
+    branches: ["ryzen-avx512-cmake"]
   schedule:
     - cron: "17 18 * * 1"
 
@@ -50,8 +50,9 @@ jobs:
           # queries: security-extended,security-and-quality
 
       - name: Build
-        working-directory: src
-        run: make -j build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=g++-14
+          cmake --build build --parallel 2
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4.35.2

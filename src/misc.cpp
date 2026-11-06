@@ -36,16 +36,8 @@
 #include <sstream>
 #include <string_view>
 
-#if defined(_WIN32)
-    #ifndef NOMINMAX
-        #define NOMINMAX
-    #endif
-    #include <direct.h>
-    #include <windows.h>
-    #include <shellapi.h>
-#endif
-
 #include "types.h"
+#include "build_info.h"
 
 namespace Stockfish {
 
@@ -62,7 +54,7 @@ constexpr std::string_view version = "dev";
 // usual I/O functionality, all without changing a single line of code!
 // Idea from http://groups.google.com/group/comp.lang.c++/msg/1d941c0f26ea0d81
 
-struct Tie: public std::streambuf {  // MSVC requires split streambuf for cin and cout
+struct Tie: public std::streambuf {
 
     Tie(std::streambuf* b, std::streambuf* l) :
         buf(b),
@@ -144,31 +136,10 @@ std::string engine_version_info() {
 
     if constexpr (version == "dev")
     {
-        ss << "-";
-#ifdef GIT_DATE
-        ss << stringify(GIT_DATE);
-#else
-        constexpr std::string_view months("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec");
-
-        std::string       month, day, year;
-        std::stringstream date(__DATE__);  // From compiler, format is "Sep 21 2008"
-
-        date >> month >> day >> year;
-        ss << year << std::setw(2) << std::setfill('0') << (1 + months.find(month) / 4)
-           << std::setw(2) << std::setfill('0') << day;
-#endif
-
-#ifdef GIT_DIFFINDEX
-        ss << "-m";
-#endif
-
-        ss << "-";
-
-#ifdef GIT_SHA
-        ss << stringify(GIT_SHA);
-#else
-        ss << "nogit";
-#endif
+        ss << "-" << BuildInfo::Date;
+        if constexpr (BuildInfo::Modified)
+            ss << "-m";
+        ss << "-" << BuildInfo::Revision;
     }
 
     return ss.str();
@@ -183,123 +154,19 @@ std::string engine_info(bool to_uci) {
 // Returns a string trying to describe the compiler we use
 std::string compiler_info() {
 
-#define make_version_string(major, minor, patch) \
-    stringify(major) "." stringify(minor) "." stringify(patch)
-
-    // Predefined macros hell:
-    //
-    // __GNUC__                Compiler is GCC, Clang or ICX
-    // __clang__               Compiler is Clang or ICX
-    // __INTEL_LLVM_COMPILER   Compiler is ICX
-    // _MSC_VER                Compiler is MSVC
-    // _WIN32                  Building on Windows (any)
-    // _WIN64                  Building on Windows 64 bit
-
     std::string compiler = "\nCompiled by                : ";
-
-#if defined(__INTEL_LLVM_COMPILER)
-    compiler += "ICX ";
-    compiler += stringify(__INTEL_LLVM_COMPILER);
-#elif defined(__clang__)
-    compiler += "clang++ ";
-    compiler += make_version_string(__clang_major__, __clang_minor__, __clang_patchlevel__);
-#elif _MSC_VER
-    compiler += "MSVC ";
-    compiler += "(version ";
-    compiler += stringify(_MSC_FULL_VER) "." stringify(_MSC_BUILD);
-    compiler += ")";
-#elif defined(__e2k__) && defined(__LCC__)
-    #define dot_ver2(n) \
-        compiler += char('.'); \
-        compiler += char('0' + (n) / 10); \
-        compiler += char('0' + (n) % 10);
-
-    compiler += "MCST LCC ";
-    compiler += "(version ";
-    compiler += std::to_string(__LCC__ / 100);
-    dot_ver2(__LCC__ % 100) dot_ver2(__LCC_MINOR__) compiler += ")";
-#elif __GNUC__
-    compiler += "g++ (GNUC) ";
-    compiler += make_version_string(__GNUC__, __GNUC_MINOR__, __GNUC_PATCHLEVEL__);
-#else
-    compiler += "Unknown compiler ";
-    compiler += "(unknown version)";
-#endif
-
-#if defined(__APPLE__)
-    compiler += " on Apple";
-#elif defined(__CYGWIN__)
-    compiler += " on Cygwin";
-#elif defined(__MINGW64__)
-    compiler += " on MinGW64";
-#elif defined(__MINGW32__)
-    compiler += " on MinGW32";
-#elif defined(__ANDROID__)
-    compiler += " on Android";
-#elif defined(__linux__)
+    compiler += BuildInfo::Compiler;
     compiler += " on Linux";
-#elif defined(_WIN64)
-    compiler += " on Microsoft Windows 64-bit";
-#elif defined(_WIN32)
-    compiler += " on Microsoft Windows 32-bit";
-#else
-    compiler += " on unknown system";
-#endif
 
-    compiler += "\nCompilation architecture   : ";
-#if defined(ARCH)
-    compiler += stringify(ARCH);
-#else
-    compiler += "(undefined architecture)";
-#endif
-
-    compiler += "\nCompilation settings       : ";
-    compiler += (Is64Bit ? "64bit" : "32bit");
-#if defined(USE_AVX512ICL)
-    compiler += " AVX512ICL";
-#endif
-#if defined(USE_VNNI)
-    compiler += " VNNI";
-#endif
-#if defined(USE_AVX512)
-    compiler += " AVX512";
-#endif
-    compiler += (HasPext ? " BMI2" : "");
-#if defined(USE_AVX2)
-    compiler += " AVX2";
-#endif
-#if defined(USE_SSE41)
-    compiler += " SSE41";
-#endif
-#if defined(USE_SSSE3)
-    compiler += " SSSE3";
-#endif
-#if defined(USE_SSE2)
-    compiler += " SSE2";
-#endif
-#if defined(USE_NEON_DOTPROD)
-    compiler += " NEON_DOTPROD";
-#elif defined(USE_NEON)
-    compiler += " NEON";
-#endif
-#if defined(USE_LASX)
-    compiler += " LASX";
-#endif
-#if defined(USE_LSX)
-    compiler += " LSX";
-#endif
-    compiler += (HasPopCnt ? " POPCNT" : "");
+    compiler += "\nCompilation architecture   : Ryzen 9800X3D (Zen 5)";
+    compiler += "\nCompilation settings       : 64bit AVX512 VNNI VBMI2 BMI2 POPCNT";
 
 #if !defined(NDEBUG)
     compiler += " DEBUG";
 #endif
 
     compiler += "\nCompiler __VERSION__ macro : ";
-#ifdef __VERSION__
     compiler += __VERSION__;
-#else
-    compiler += "(undefined macro)";
-#endif
 
     compiler += "\n";
 
@@ -499,74 +366,14 @@ u64 hash_bytes(const char* data, usize size) {
 void start_logger(const fs::path& fname) { Logger::start(fname); }
 
 
-// Convert a wide string to an UTF8 string
-std::string utf8_from_wstring(std::wstring_view s) {
-#ifdef _WIN32
-    if (s.empty())
-        return {};
-
-    int size =
-      WideCharToMultiByte(CP_UTF8, 0, s.data(), int(s.size()), nullptr, 0, nullptr, nullptr);
-    if (size <= 0)
-        return {};
-
-    std::string out(size, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, s.data(), int(s.size()), out.data(), size, nullptr, nullptr);
-    return out;
-#else
-    return std::string(s.begin(), s.end());
-#endif
-}
-
-
 // This utility allows us to handle filenames and paths with UTF8 encoding
-fs::path path_from_utf8(const std::string& path) {
-#ifdef _WIN32
-    int u8len = static_cast<int>(path.size());
-
-    // First attempt UTF-8, then fall back to ANSI for old GUIs like Arena
-    constexpr int CodePages[2] = {CP_UTF8, CP_ACP};
-    for (int cp : CodePages)
-    {
-        int flags = cp == CP_UTF8 ? MB_ERR_INVALID_CHARS : 0;
-        int wlen  = MultiByteToWideChar(cp, flags, path.c_str(), u8len, NULL, 0);
-        if (wlen > 0)
-        {
-            std::wstring wstr(static_cast<usize>(wlen), L'\0');
-            MultiByteToWideChar(cp, 0, path.c_str(), u8len, wstr.data(), wlen);
-            return {wstr};
-        }
-    }
-
-    return {path};
-#else
-    return {path};
-#endif
-}
+fs::path path_from_utf8(const std::string& path) { return {path}; }
 
 
 // Constructor for the CommandLine class
 CommandLine::CommandLine(int _argc, char** _argv) :
     argc(_argc),
-    argv(_argv) {
-#ifdef _WIN32
-    // Convert any non-ANSI characters passed on the command line to UTF-8
-    int wargc = 0;
-    if (LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &wargc))
-    {
-        for (int i = 0; i < wargc; ++i)
-            argv_storage.push_back(utf8_from_wstring(wargv[i]));
-        LocalFree(wargv);
-
-        for (std::string& s : argv_storage)
-            argv_utf8.push_back(s.data());
-        argv_utf8.push_back(nullptr);
-
-        argc = wargc;
-        argv = argv_utf8.data();
-    }
-#endif
-}
+    argv(_argv) {}
 
 
 // Read a numerical value from the command line
@@ -607,31 +414,11 @@ bool is_whitespace(std::string_view s) {
 // is one of the locations where we look for the NNUE file.
 fs::path CommandLine::get_binary_directory(fs::path argv0) {
 
-#ifdef _WIN32
-    // Prefer the executable path reported by Windows. Unlike _get_wpgmptr,
-    // this does not depend on whether the CRT used a narrow or wide entry
-    // point. Windows paths cannot exceed 32767 characters, so a fixed
-    // buffer is always sufficient. Falls back to argv0 if the API fails.
-    constexpr DWORD MaxPath = 32768;
-    wchar_t         path[MaxPath];
-
-    if (const DWORD length = GetModuleFileNameW(nullptr, path, MaxPath))
-        argv0 = fs::path(path, path + length);
-#endif
-
     auto binaryDirectory = argv0.parent_path();
     if (binaryDirectory.empty())
         binaryDirectory = fs::path(".");
     return binaryDirectory;
 }
 
-
-// On Windows, tell the console to use UTF8 encoding
-void set_console_utf8() {
-#ifdef _WIN32
-    SetConsoleCP(CP_UTF8);
-    SetConsoleOutputCP(CP_UTF8);
-#endif
-}
 
 }  // namespace Stockfish

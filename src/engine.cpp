@@ -133,7 +133,7 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
     options.add("SyzygyProbeLimit", Option(7, 0, 7));
 
     options.add(  //
-      "EvalFile", Option(EvalFileDefaultName, [this](const Option& o) {
+      "EvalFile", Option(Eval::EvalFileDefaultName, [this](const Option& o) {
           load_network(path_from_utf8(std::string(o)));
           return std::nullopt;
       }));

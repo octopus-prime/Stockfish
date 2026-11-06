@@ -89,27 +89,24 @@ class K32H3 {
     // Number of feature dimensions (67,584 piece-squares)
     static constexpr IndexType Dimensions = NumBlocks * BlockDimensions;
 
-#define B(v) (v * PS_NB)
     // clang-format off
     static constexpr IndexType KingBuckets[SQUARE_NB] = {
-        B(28), B(29), B(30), B(31), B(31), B(30), B(29), B(28),
-        B(24), B(25), B(26), B(27), B(27), B(26), B(25), B(24),
-        B(20), B(21), B(22), B(23), B(23), B(22), B(21), B(20),
-        B(16), B(17), B(18), B(19), B(19), B(18), B(17), B(16),
-        B(12), B(13), B(14), B(15), B(15), B(14), B(13), B(12),
-        B( 8), B( 9), B(10), B(11), B(11), B(10), B( 9), B( 8),
-        B( 4), B( 5), B( 6), B( 7), B( 7), B( 6), B( 5), B( 4),
-        B( 0), B( 1), B( 2), B( 3), B( 3), B( 2), B( 1), B( 0),
+        28 * PS_NB, 29 * PS_NB, 30 * PS_NB, 31 * PS_NB, 31 * PS_NB, 30 * PS_NB, 29 * PS_NB, 28 * PS_NB,
+        24 * PS_NB, 25 * PS_NB, 26 * PS_NB, 27 * PS_NB, 27 * PS_NB, 26 * PS_NB, 25 * PS_NB, 24 * PS_NB,
+        20 * PS_NB, 21 * PS_NB, 22 * PS_NB, 23 * PS_NB, 23 * PS_NB, 22 * PS_NB, 21 * PS_NB, 20 * PS_NB,
+        16 * PS_NB, 17 * PS_NB, 18 * PS_NB, 19 * PS_NB, 19 * PS_NB, 18 * PS_NB, 17 * PS_NB, 16 * PS_NB,
+        12 * PS_NB, 13 * PS_NB, 14 * PS_NB, 15 * PS_NB, 15 * PS_NB, 14 * PS_NB, 13 * PS_NB, 12 * PS_NB,
+         8 * PS_NB,  9 * PS_NB, 10 * PS_NB, 11 * PS_NB, 11 * PS_NB, 10 * PS_NB,  9 * PS_NB,  8 * PS_NB,
+         4 * PS_NB,  5 * PS_NB,  6 * PS_NB,  7 * PS_NB,  7 * PS_NB,  6 * PS_NB,  5 * PS_NB,  4 * PS_NB,
+         0 * PS_NB,  1 * PS_NB,  2 * PS_NB,  3 * PS_NB,  3 * PS_NB,  2 * PS_NB,  1 * PS_NB,  0 * PS_NB,
     };
     // clang-format on
-#undef B
 
     // Maximum number of simultaneously active features.
     static constexpr IndexType MaxActiveDimensions = 32;
     using IndexList                                = ValueList<u16, MaxActiveDimensions>;
     using DiffType                                 = DirtyPiece;
 
-#if defined(USE_AVX512ICL)
     // Compute all changed feature indices and write them to the given lists
     static void write_indices(const std::array<Piece, SQUARE_NB>& oldPieces,
                               const std::array<Piece, SQUARE_NB>& newPieces,
@@ -119,7 +116,6 @@ class K32H3 {
                               Square                              ksq,
                               IndexList&                          removed,
                               IndexList&                          added);
-#endif
 
     // Index of a feature within its block for a given king position and another piece
     // on some square

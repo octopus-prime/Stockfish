@@ -1107,7 +1107,6 @@ inline void add_dirty_threat(DirtyThreats* const dts,
     dts->list.push_back({pc, threatened, s, threatenedSq, putPiece});
 }
 
-#ifdef USE_AVX512ICL
 // Given a DirtyThreat template and bit offsets to insert the piece type and square, write the threats
 // present at the given bitboard.
 template<int SqShift, int PcShift>
@@ -1140,7 +1139,6 @@ void write_multiple_dirties(const Position& p,
       _mm512_ternarylogic_epi32(template_v, threat_squares, threat_pieces, 254 /* A | B | C */);
     _mm512_storeu_si512(write, dirties);
 }
-#endif
 
 constexpr bool can_slider_threat(Piece pc, Piece slider) {
     return type_of(pc) != QUEEN || type_of(slider) == QUEEN;
@@ -1207,7 +1205,6 @@ void Position::update_piece_threats(Piece               pc,
         incomingThreats |= (attacks_bb(PAWN, s, WHITE) & pieces(BLACK, PAWN))
                          | (attacks_bb(PAWN, s, BLACK) & pieces(WHITE, PAWN));
 
-#ifdef USE_AVX512ICL
     write_multiple_dirties<DirtyThreat::ThreatenedSqOffset, DirtyThreat::ThreatenedPcOffset>(
       *this, threatened, {pc, NO_PIECE, s, Square(0), putPiece}, dts);
 
@@ -1218,32 +1215,6 @@ void Position::update_piece_threats(Piece               pc,
     // For ICL, direct threats were written above
     if constexpr (ComputeRay)
         process_sliders(false);
-#else
-    while (threatened)
-    {
-        Square threatenedSq = pop_lsb(threatened);
-        Piece  threatenedPc = piece_on(threatenedSq);
-        assert(threatenedSq != s);
-        assert(threatenedPc != NO_PIECE);
-
-        add_dirty_threat(dts, putPiece, pc, threatenedPc, s, threatenedSq);
-    }
-
-    if constexpr (ComputeRay)
-        process_sliders(true);
-    else
-        incomingThreats |= pt == QUEEN ? sliders & pieces(QUEEN) : sliders;
-
-    while (incomingThreats)
-    {
-        Square srcSq = pop_lsb(incomingThreats);
-        Piece  srcPc = piece_on(srcSq);
-        assert(srcSq != s);
-        assert(srcPc != NO_PIECE);
-
-        add_dirty_threat(dts, putPiece, srcPc, pc, srcSq, s);
-    }
-#endif
 }
 
 Key Position::prefetch_key(Move m) const {

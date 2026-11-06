@@ -44,7 +44,6 @@ enum Stages : i8 {
 
 namespace {
 
-#ifdef USE_AVX512
 // Load the Move, and the ExtMove value, into all lanes of 512-bit registers
 static void splat_extmove(const ExtMove& m, __m512i& move, __m512i& value) {
     move  = _mm512_set1_epi32(m.raw());
@@ -95,7 +94,6 @@ struct MoveSorter {
         write(8, _mm512_setr_epi32(8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31));
     }
 };
-#endif
 
 
 // Sort moves in descending order up to and including a given limit.
@@ -107,7 +105,6 @@ void partial_insertion_sort(ExtMove* begin, ExtMove* end, int limit) {
 
     ExtMove *sortedEnd = begin, *p = begin + 1;
 
-#ifdef USE_AVX512
     MoveSorter sorter(*begin);
     for (; p < end; ++p)
     {
@@ -122,7 +119,6 @@ void partial_insertion_sort(ExtMove* begin, ExtMove* end, int limit) {
     }
     sorter.write_sorted(begin, sortedEnd - begin + 1);
     // Use scalar implementation for any remaining elements
-#endif
 
     for (; p < end; ++p)
         if (p->value >= limit)

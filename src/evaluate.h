@@ -29,11 +29,8 @@ class Position;
 
 namespace Eval {
 
-// The default net name MUST follow the format nn-[SHA256 first 12 digits].nnue
-// for the build process (profile-build and fishtest) to work. Do not change the
-// name of the macro or the location where this macro is defined, as it is used
-// in the Makefile/Fishtest.
-#define EvalFileDefaultName "nn-d1ee674a62ca.nnue"
+// CMake validates the SHA-256 prefix before embedding this network.
+inline constexpr char EvalFileDefaultName[] = "nn-d1ee674a62ca.nnue";
 
 namespace NNUE {
 class Network;

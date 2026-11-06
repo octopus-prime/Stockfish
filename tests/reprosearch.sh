@@ -2,6 +2,7 @@
 # verify reproducible search
 
 set -o pipefail
+export EXE=${EXE:-./stockfish}
 
 error()
 {
@@ -17,7 +18,7 @@ echo "reprosearch testing started"
 # the same node count for each iteration.
 cat << EOF > repeat.exp
  set timeout 10
- spawn ./stockfish
+ spawn \$env(EXE)
  lassign \$argv nodes
 
  send "uci\n"

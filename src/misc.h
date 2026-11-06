@@ -37,13 +37,6 @@
 #include <type_traits>
 #include <vector>
 
-#if !defined(NO_PREFETCH) && (defined(_MSC_VER) || defined(__INTEL_COMPILER))
-    #include <immintrin.h>
-#endif
-
-#define stringify2(x) #x
-#define stringify(x) stringify2(x)
-
 namespace Stockfish {
 
 using u64 = std::uint64_t;
@@ -59,10 +52,8 @@ using i8  = std::int8_t;
 using usize = std::size_t;
 using isize = std::ptrdiff_t;
 
-#if defined(__GNUC__) && defined(IS_64BIT)
 __extension__ using u128 = unsigned __int128;
 __extension__ using i128 = signed __int128;
-#endif
 
 std::string engine_version_info();
 std::string engine_info(bool to_uci = false);
@@ -77,8 +68,7 @@ enum class PrefetchRw {
 // NOTE: PrefetchLoc controls locality / cache level, not whether a prefetch
 //       is issued. In particular, PrefetchLoc::NONE maps to a non-temporal /
 //       lowest-locality prefetch (Intel: _MM_HINT_NTA, GCC/Clang: locality = 0)
-//       and therefore still performs a prefetch. To completely disable
-//       prefetching, define NO_PREFETCH so that prefetch() becomes a no-op.
+//       and therefore still performs a prefetch.
 enum class PrefetchLoc {
     NONE,      // Non-temporal / no cache locality (still issues a prefetch)
     LOW,       // Low locality (e.g. T2 / L2)
@@ -89,52 +79,15 @@ enum class PrefetchLoc {
 // Preloads the given address into cache. This is a non-blocking
 // function that doesn't stall the CPU waiting for data to be loaded from memory,
 // which can be quite slow.
-#ifdef NO_PREFETCH
-template<PrefetchRw RW = PrefetchRw::READ, PrefetchLoc LOC = PrefetchLoc::HIGH>
-void prefetch(const void*) {}
-#elif defined(_MSC_VER) || defined(__INTEL_COMPILER)
-
-constexpr int get_intel_hint(PrefetchRw rw, PrefetchLoc loc) {
-    if (rw == PrefetchRw::WRITE)
-    {
-    #ifdef _MM_HINT_ET0
-        return _MM_HINT_ET0;
-    #else
-        // Fallback when write-prefetch hint is not available: use T0
-        return _MM_HINT_T0;
-    #endif
-    }
-    switch (loc)
-    {
-    case PrefetchLoc::NONE :
-        return _MM_HINT_NTA;
-    case PrefetchLoc::LOW :
-        return _MM_HINT_T2;
-    case PrefetchLoc::MODERATE :
-        return _MM_HINT_T1;
-    case PrefetchLoc::HIGH :
-        return _MM_HINT_T0;
-    default :
-        return _MM_HINT_T0;
-    }
-}
-
-template<PrefetchRw RW = PrefetchRw::READ, PrefetchLoc LOC = PrefetchLoc::HIGH>
-void prefetch(const void* addr) {
-    _mm_prefetch(static_cast<const char*>(addr), get_intel_hint(RW, LOC));
-}
-#else
 template<PrefetchRw RW = PrefetchRw::READ, PrefetchLoc LOC = PrefetchLoc::HIGH>
 void prefetch(const void* addr) {
     __builtin_prefetch(addr, static_cast<int>(RW), static_cast<int>(LOC));
 }
-#endif
 
 void start_logger(const std::filesystem::path& fname);
 
 std::optional<usize> str_to_size_t(const std::string& s);
 
-std::string           utf8_from_wstring(std::wstring_view s);
 std::filesystem::path path_from_utf8(const std::string& path);
 
 // Reads the file as bytes.
@@ -195,8 +148,7 @@ void sync_cout_start();
 void sync_cout_end();
 
 // True if and only if the binary is compiled on a little-endian machine
-static inline const u16  Le             = 1;
-static inline const bool IsLittleEndian = *reinterpret_cast<const char*>(&Le) == 1;
+inline constexpr bool IsLittleEndian = true;
 
 
 template<typename T, usize MaxSize>
@@ -328,20 +280,9 @@ class MultiArray {
     constexpr void swap(MultiArray<T, Size, Sizes...>& other) noexcept { data_.swap(other.data_); }
 };
 
-// Wrapper around std::atomic<T> which uses relaxed accesses or plain
-// accesses, depending on the config. Intended use is e.g. wasm where
-// the overhead of atomic instructions can be significant, and we only
-// require non-tearing for the updates, while ensuring we use relaxed
-// accesses otherwise.
+// Wrapper around std::atomic<T> using relaxed accesses.
 template<typename T>
 class RelaxedAtomic {
-    static constexpr bool UseAtomic =
-#ifdef USE_SLOPPY_ATOMICS
-      !std::atomic<T>::is_always_lock_free || sizeof(T) > sizeof(usize);
-#else
-      true;
-#endif
-
    public:
     RelaxedAtomic() = default;
     RelaxedAtomic(T val) :
@@ -389,22 +330,16 @@ class RelaxedAtomic {
 
     T load(std::memory_order order) const {
         assert(order == std::memory_order_relaxed);
-        if constexpr (UseAtomic)
-            return inner.load(order);
-        else
-            return inner;
+        return inner.load(order);
     }
 
     void store(T val, std::memory_order order) {
         assert(order == std::memory_order_relaxed);
-        if constexpr (UseAtomic)
-            inner.store(val, order);
-        else
-            inner = val;
+        inner.store(val, order);
     }
 
    private:
-    std::conditional_t<UseAtomic, std::atomic<T>, T> inner;
+    std::atomic<T> inner;
 };
 
 // xorshift64star Pseudo-Random Number Generator
@@ -451,18 +386,7 @@ class PRNG {
     }
 };
 
-inline usize mul_hi64(u64 a, usize b) {
-#if defined(__GNUC__) && defined(IS_64BIT) && !defined(__wasm__)
-    return (u128(a) * u128(b)) >> 64;
-#else
-    u64 aL = u32(a), aH = a >> 32;
-    u64 bL = u32(b), bH = u64(b) >> 32;
-    u64 c1 = (aL * bL) >> 32;
-    u64 c2 = aH * bL + c1;
-    u64 c3 = aL * bH + u32(c2);
-    return aH * bH + (c2 >> 32) + (c3 >> 32);
-#endif
-}
+inline usize mul_hi64(u64 a, usize b) { return (u128(a) * u128(b)) >> 64; }
 
 template<typename T1, typename T2>
 inline constexpr T2 interpolate(T1 x, T1 x0, T1 x1, T2 y0, T2 y1) {
@@ -509,10 +433,6 @@ struct CommandLine {
     char** argv;
 
    private:
-#ifdef _WIN32
-    std::vector<std::string> argv_storage;
-    std::vector<char*>       argv_utf8;
-#endif
 };
 
 namespace Utility {
@@ -526,56 +446,17 @@ void move_to_front(std::vector<T>& vec, Predicate pred) {
 }
 }
 
-#ifndef __has_builtin
-    #define __has_builtin(x) 0
-#endif
-
-#if defined(__GNUC__)
-    #define sf_always_inline inline __attribute__((always_inline))
-#elif defined(_MSC_VER)
-    #define sf_always_inline __forceinline
-#else
-    // plain inline for other compilers
-    #define sf_always_inline inline
-#endif
+#define sf_always_inline inline __attribute__((always_inline))
 
 #if defined(__clang__)
     #define sf_assume(cond) __builtin_assume(cond)
-#elif defined(__GNUC__)
-    #if __GNUC__ >= 13
-        #define sf_assume(cond) __attribute__((assume(cond)))
-    #else
-        #define sf_assume(cond) \
-            do \
-            { \
-                if (!(cond)) \
-                    __builtin_unreachable(); \
-            } while (0)
-    #endif
-#elif defined(_MSC_VER)
-    #define sf_assume(cond) __assume(cond)
 #else
-    // do nothing for other compilers
-    #define sf_assume(cond)
+    #define sf_assume(cond) __attribute__((assume(cond)))
 #endif
 
-#ifdef __GNUC__
-    #define sf_unreachable() __builtin_unreachable()
-#elif defined(_MSC_VER)
-    #define sf_unreachable() __assume(0)
-#else
-    #define sf_unreachable()
-#endif
+#define sf_unreachable() __builtin_unreachable()
 
-#ifdef __GNUC__
-    #define RESTRICT __restrict__
-#elif defined(_MSC_VER)
-    #define RESTRICT __restrict
-#else
-    #define RESTRICT
-#endif
-
-void set_console_utf8();
+#define RESTRICT __restrict__
 
 }  // namespace Stockfish
 

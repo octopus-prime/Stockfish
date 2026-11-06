@@ -1,0 +1,8 @@
+#pragma once
+
+namespace Stockfish::BuildInfo {
+inline constexpr char Date[] = "@GIT_DATE@";
+inline constexpr char Revision[] = "@GIT_SHA@";
+inline constexpr char Compiler[] = "@CMAKE_CXX_COMPILER_ID@ @CMAKE_CXX_COMPILER_VERSION@";
+inline constexpr bool Modified = @GIT_MODIFIED@;
+}

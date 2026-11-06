@@ -54,7 +54,7 @@
 #include "misc.h"
 #include "thread_native.h"
 
-#if defined(__linux__) && !defined(MADV_COLLAPSE)
+#ifndef MADV_COLLAPSE
     #define MADV_COLLAPSE 25
 #endif
 
@@ -63,11 +63,7 @@ namespace Stockfish::shm {
 namespace detail {
 
 inline void* map_shared(int fd, usize size) noexcept {
-#if defined(__linux__) && !defined(__ANDROID__)
     return Stockfish::mmap_huge_aligned(size, MAP_SHARED, fd);
-#else
-    return mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-#endif
 }
 
 class SharedMemoryRegistry {
@@ -303,12 +299,7 @@ class SharedMemory {
     }
 
     static UniqueFd create_unix_socket() {
-#ifdef SOCK_CLOEXEC
         UniqueFd fd(socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0));
-#else
-        UniqueFd fd(socket(AF_UNIX, SOCK_STREAM, 0));
-        set_cloexec(fd.get());
-#endif
         return fd;
     }
 
@@ -351,11 +342,7 @@ class SharedMemory {
             msg.msg_controllen = space;
 
             ssize_t bytes_recv;
-#ifdef MSG_CMSG_CLOEXEC
-            int flags = MSG_CMSG_CLOEXEC;
-#else
-            int flags = 0;
-#endif
+            int     flags = MSG_CMSG_CLOEXEC;
             do
                 bytes_recv = recvmsg(peer_fd.get(), &msg, flags);
             while (bytes_recv < 0 && errno == EINTR);
@@ -368,9 +355,6 @@ class SharedMemory {
                 {
                     int received_fd;
                     memcpy(&received_fd, CMSG_DATA(cmsg), sizeof(received_fd));
-#ifndef MSG_CMSG_CLOEXEC
-                    set_cloexec(received_fd);
-#endif
                     return UniqueFd(received_fd);
                 }
             }
@@ -423,13 +407,8 @@ class SharedMemory {
 
                   if (fds[FdServer].revents & POLLIN)
                   {
-                    // Another fish wants access
-#if !defined(__APPLE__)
+                      // Another fish wants access
                       UniqueFd client_fd(accept4(server_fd.get(), nullptr, nullptr, SOCK_CLOEXEC));
-#else
-                      UniqueFd client_fd(accept(server_fd.get(), nullptr, nullptr));
-                      set_cloexec(client_fd.get());
-#endif
                       if (!client_fd.is_valid())
                           continue;  // including EINTR
 
@@ -461,16 +440,7 @@ class SharedMemory {
                       cmsg->cmsg_len         = CMSG_LEN(sizeof(raw_fd));
                       memcpy(CMSG_DATA(cmsg), &raw_fd, sizeof(raw_fd));
 
-#ifdef SO_NOSIGPIPE
-                      int yes = 1;
-                      setsockopt(client_fd.get(), SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes));
-#endif
-
-#ifdef MSG_NOSIGNAL
                       int flags = MSG_NOSIGNAL;
-#else
-                      int flags = 0;
-#endif
                       while (sendmsg(client_fd.get(), &msg, flags) < 0 && errno == EINTR)
                       {}
                   }
@@ -505,21 +475,10 @@ class SharedMemory {
 
             if (creator)
             {
-#if defined(MFD_CLOEXEC)
                 // Failed to get it from a peer (no peers, or only dead peers), so create
                 memfd.reset(memfd_create("replicated_data", MFD_CLOEXEC));
                 if (!memfd.is_valid())
                     return false;
-#else
-                char temp_path[PATH_MAX];
-                strncpy(temp_path, "/tmp/stockfish_replicated_data.XXXXXX", PATH_MAX);
-
-                memfd.reset(mkstemp(temp_path));
-                if (!memfd.is_valid())
-                    return false;
-                set_cloexec(memfd.get());
-                unlink(temp_path);
-#endif
 
                 if (ftruncate(memfd.get(), sizeof(T)) != 0)
                     return false;
@@ -532,32 +491,21 @@ class SharedMemory {
             if (mapped_mem == MAP_FAILED)
                 return false;
 
-#ifdef MADV_HUGEPAGE
             (void) madvise(mapped_mem, sizeof(T), MADV_HUGEPAGE);
-#endif
 
             if (creator)
             {
                 // Creator is responsible for initialization
                 *mapped_mem = initial_value;
 
-#if defined(__linux__)
                 (void) madvise(mapped_mem, sizeof(T), MADV_COLLAPSE);
-#endif
             }
 
             mapped_ptr_ = data_ptr_ = mapped_mem;
 
             int shutdown_pipe[2];
-#if !defined(__APPLE__)
             if (pipe2(shutdown_pipe, O_CLOEXEC) != 0)
                 return false;
-#else
-            if (pipe(shutdown_pipe) != 0)
-                return false;
-            set_cloexec(shutdown_pipe[0]);
-            set_cloexec(shutdown_pipe[1]);
-#endif
             UniqueFd shutdown_receiver(shutdown_pipe[0]);
             shutdown_ = UniqueFd(shutdown_pipe[1]);
 
